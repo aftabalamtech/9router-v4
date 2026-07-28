@@ -89,6 +89,7 @@ export async function buildAutoRouter(): Promise<Router> {
     return compareRoutePaths(relA, relB);
   });
   let mounted = 0;
+  const importFailures: string[] = [];
 
   for (const file of routeFiles) {
     const rel = relative(ROUTES_DIR, file);
@@ -100,10 +101,10 @@ export async function buildAutoRouter(): Promise<Router> {
 
     let mod: Record<string, unknown>;
     try {
-      console.log(`[router] Attempting to import: ${file}`);
       mod = await import(pathToFileURL(file).href);
     } catch (err) {
-      console.warn(`[router] Failed to import ${rel}:`, err);
+      const message = err instanceof Error ? err.message : String(err);
+      importFailures.push(`${rel}: ${message}`);
       continue;
     }
 
@@ -112,9 +113,6 @@ export async function buildAutoRouter(): Promise<Router> {
       const handler = (mod[`${method}_handler`] ?? mod[method]) as ((req: Request, res: Response) => Promise<unknown>) | undefined;
       if (typeof handler === "function") {
         const expressMethod = method.toLowerCase() as "get" | "post" | "put" | "patch" | "delete";
-        if (expressPath === "/auth/login") {
-           console.log(`DEBUG: Mounted ${method} ${expressPath}`);
-        }
         router[expressMethod](expressPath, async (req: Request, res: Response) => {
           try {
             const params: Record<string, any> = { ...req.params };
@@ -176,6 +174,12 @@ export async function buildAutoRouter(): Promise<Router> {
         mounted++;
       }
     }
+  }
+
+  if (importFailures.length > 0) {
+    throw new Error(
+      `[router] Failed to import ${importFailures.length} route file(s):\n${importFailures.join("\n")}`
+    );
   }
 
   if (process.env.DEBUG_ROUTES) {

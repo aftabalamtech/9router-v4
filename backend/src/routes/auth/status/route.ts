@@ -14,6 +14,7 @@ export async function GET(req, res) {
     const oidcEmail = String(session?.oidcEmail || "").trim();
     const displayName = oidcName || oidcEmail || (session?.oidc ? "OIDC user" : "Password user");
     const loginMethod = session?.oidc ? "OIDC" : "Password";
+    const initialPasswordConfigured = !!process.env.INITIAL_PASSWORD;
 
     return res.json({
       requireLogin,
@@ -21,6 +22,8 @@ export async function GET(req, res) {
       oidcConfigured: isOidcConfigured(settings),
       oidcLoginLabel: (settings.oidcLoginLabel || "Sign in with OIDC").trim() || "Sign in with OIDC",
       hasPassword: !!settings.password,
+      initialPasswordConfigured,
+      passwordConfigured: !!settings.password || initialPasswordConfigured,
       displayName,
       loginMethod,
       oidcName: oidcName || null,
@@ -35,6 +38,8 @@ export async function GET(req, res) {
       oidcConfigured: false,
       oidcLoginLabel: "Sign in with OIDC",
       hasPassword: false,
+      initialPasswordConfigured: false,
+      passwordConfigured: false,
       displayName: "Password user",
       loginMethod: "Password",
       oidcName: null,

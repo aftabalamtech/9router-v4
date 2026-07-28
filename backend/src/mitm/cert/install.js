@@ -1,5 +1,3 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 const fs = require("fs");
 const crypto = require("crypto");
 const { exec } = require("child_process");

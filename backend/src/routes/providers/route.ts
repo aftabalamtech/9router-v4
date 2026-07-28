@@ -50,8 +50,6 @@ async function normalizeProxyPoolId(proxyPoolId) {
 export async function GET(req, res) {
   try {
     const connections = await getProviderConnections();
-    console.log(`[DEBUG /api/providers] total=${connections.length} cf=${connections.filter(c=>c.provider==='cloudflare-ai').length} auth=${req.headers['authorization']?.slice(0,10)||'cookie'} cookie=${!!req.cookies?.['9r_session']}`);
-    const fs = await import('node:fs'); fs.appendFileSync('/tmp/cf_debug.log', JSON.stringify({ts:Date.now(),total:connections.length,cf:connections.filter(c=>c.provider==='cloudflare-ai').length,auth:req.headers['authorization']?.slice(0,10)||'cookie',cookie:!!req.cookies?.['9r_session']})+'\n');
 
     // Build nodeNameMap for compatible providers (id → name)
     let nodeNameMap = {};

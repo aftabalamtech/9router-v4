@@ -53,6 +53,18 @@ async function trySqlJs() {
 }
 
 async function initAdapter() {
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (databaseUrl) {
+    const { createPostgresAdapter } = await import("./adapters/postgresAdapter.js");
+    const adapter = await createPostgresAdapter(databaseUrl);
+    if (!state.logged) {
+      const parsed = new URL(databaseUrl);
+      console.log(`[DB] Driver: ${adapter.driver} | host: ${parsed.hostname} | database: ${parsed.pathname.slice(1)}`);
+      state.logged = true;
+    }
+    return adapter;
+  }
+
   ensureDirs();
   // Order per runtime:
   //   Bun:  bun:sqlite → sql.js
@@ -70,7 +82,8 @@ async function initAdapter() {
 
   const { runMigrationOnce } = await import("./migrate.js");
   await runMigrationOnce(adapter);
-  return adapter;
+  const { createAsyncAdapter } = await import("./adapters/asyncAdapter.js");
+  return createAsyncAdapter(adapter);
 }
 
 export async function getAdapter() {

@@ -207,8 +207,17 @@ export const TABLES = {
   },
 };
 
-export function buildCreateTableSql(name, def) {
-  const cols = Object.entries(def.columns).map(([k, v]) => `${k} ${v}`);
+export function toPostgresColumnDef(definition) {
+  return definition
+    .replace(/INTEGER PRIMARY KEY AUTOINCREMENT/i, "SERIAL PRIMARY KEY")
+    .replace(/\bREAL\b/gi, "DOUBLE PRECISION");
+}
+
+export function buildCreateTableSql(name, def, dialect = "sqlite") {
+  const cols = Object.entries(def.columns).map(([k, v]) => {
+    const columnDef = dialect === "postgres" ? toPostgresColumnDef(v) : v;
+    return `${k} ${columnDef}`;
+  });
   if (def.primaryKey) cols.push(def.primaryKey);
   if (def.unique) cols.push(`UNIQUE(${def.unique.join(", ")})`);
   return `CREATE TABLE IF NOT EXISTS ${name} (${cols.join(", ")})`;

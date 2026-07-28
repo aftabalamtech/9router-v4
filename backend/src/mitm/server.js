@@ -1,5 +1,3 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 const https = require("https");
 const http2 = require("http2");
 const tls = require("tls");

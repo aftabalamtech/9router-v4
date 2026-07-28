@@ -25,7 +25,9 @@ export async function GET(req, res) {
       ...safeSettings, 
       enableRequestLogs,
       enableTranslator,
-      hasPassword: !!password
+      hasPassword: !!password,
+      initialPasswordConfigured: !!process.env.INITIAL_PASSWORD,
+      passwordConfigured: !!password || !!process.env.INITIAL_PASSWORD,
     });
   } catch (error) {
     console.log("Error getting settings:", error);
@@ -52,11 +54,8 @@ export async function PATCH_handler(req, res) {
           return res.status(401).json({ error: "Invalid current password" });
         }
       } else {
-        // First time setting password, no current password needed
-        // Allow empty currentPassword or default "123456"
-        if (body.currentPassword && body.currentPassword !== "123456") {
-           return res.status(401).json({ error: "Invalid current password" });
-        }
+        // The request is already authenticated; no old password exists yet.
+        delete body.currentPassword;
       }
 
       const salt = await bcrypt.genSalt(10);

@@ -70,6 +70,13 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
 
   const handleValidate = async () => {
     setValidating(true);
+    let settled = false;
+    const fallbackId = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      setValidationResult({ valid: false, error: "Validation timeout (>15s)" });
+      setValidating(false);
+    }, VALIDATION_TIMEOUT_MS + 500);
     try {
       const data = await fetchProviderNodeValidation({
         baseUrl: formData.baseUrl,
@@ -77,14 +84,19 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
         type: isAnthropic ? "anthropic-compatible" : "openai-compatible",
         modelId: checkModelId.trim() || undefined
       });
+      if (settled) return;
+      settled = true;
       setValidationResult(data);
     } catch (error) {
+      if (settled) return;
+      settled = true;
       setValidationResult({
         valid: false,
         error: error.name === "AbortError" ? "Validation timeout (>15s)" : "Network error",
       });
     } finally {
-      setValidating(false);
+      window.clearTimeout(fallbackId);
+      if (settled) setValidating(false);
     }
   };
 

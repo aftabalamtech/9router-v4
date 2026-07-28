@@ -1,5 +1,3 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 const { exec, spawn, execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -253,15 +251,16 @@ function removeAllDNSEntriesSync() {
   } catch { /* best effort during shutdown */ }
 }
 
-export { TOOL_HOSTS };
-export { addDNSEntry };
-export { removeDNSEntry };
-export { removeAllDNSEntries };
-export { removeAllDNSEntriesSync };
-export { execWithPassword };
-export { isSudoAvailable };
-export { canRunSudoWithoutPassword };
-export { isSudoPasswordRequired };
-export { checkDNSEntry };
-export { checkAllDNSStatus };
-export {  };;
+module.exports = {
+  TOOL_HOSTS,
+  addDNSEntry,
+  removeDNSEntry,
+  removeAllDNSEntries,
+  removeAllDNSEntriesSync,
+  execWithPassword,
+  isSudoAvailable,
+  canRunSudoWithoutPassword,
+  isSudoPasswordRequired,
+  checkDNSEntry,
+  checkAllDNSStatus,
+};

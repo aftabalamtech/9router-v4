@@ -155,11 +155,11 @@ export default function APIPageClient({ machineId }) {
 
   const { copied, copy } = useCopyToClipboard();
 
-  // Security gate: block remote exposure while dashboard uses default password or login is off.
+  // Security gate: block remote exposure while password login is unconfigured or disabled.
   const isLoginUnsafe = !requireLogin || !hasPassword;
   const unsafeReason = !requireLogin
     ? "Enable \"Require login\" and set a custom password before activating the tunnel."
-    : "Change the default dashboard password before activating the tunnel.";
+    : "Configure a dashboard password before activating the tunnel.";
 
   // Auto-scroll install log
   useEffect(() => {
@@ -271,7 +271,7 @@ export default function APIPageClient({ machineId }) {
         const data = await settingsRes.json();
         setRequireApiKey(data.requireApiKey || false);
         setRequireLogin(data.requireLogin !== false);
-        setHasPassword(data.hasPassword || false);
+        setHasPassword(data.passwordConfigured ?? data.hasPassword ?? false);
         setTunnelDashboardAccess(data.tunnelDashboardAccess || false);
         setRtkEnabledState(data.rtkEnabled !== false);
         setCavemanEnabled(!!data.cavemanEnabled);
@@ -1023,7 +1023,7 @@ export default function APIPageClient({ machineId }) {
                 message={
                   !requireLogin
                     ? "Require login is disabled — anyone can access your dashboard via tunnel."
-                    : "Dashboard uses the default password — change it in Profile settings."
+                    : "Dashboard password is not configured — set it in Profile settings."
                 }
                 action={{
                   label: !requireLogin ? "Enable" : "Change password",

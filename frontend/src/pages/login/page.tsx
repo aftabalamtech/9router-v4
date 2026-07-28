@@ -10,6 +10,8 @@ export default function LoginPage() {
   const [retryAfter, setRetryAfter] = useState(0);
   const [loading, setLoading] = useState(false);
   const [hasPassword, setHasPassword] = useState<boolean | null>(null);
+  const [initialPasswordConfigured, setInitialPasswordConfigured] = useState(false);
+  const [passwordConfigured, setPasswordConfigured] = useState(true);
   const [authMode, setAuthMode] = useState("password");
   const [oidcConfigured, setOidcConfigured] = useState(false);
   const [oidcLoginLabel, setOidcLoginLabel] = useState("Sign in with OIDC");
@@ -48,6 +50,8 @@ export default function LoginPage() {
             return;
           }
           setHasPassword(!!data.hasPassword);
+          setInitialPasswordConfigured(data.initialPasswordConfigured === true);
+          setPasswordConfigured(data.passwordConfigured !== false);
           setAuthMode(data.authMode || "password");
           setOidcConfigured(data.oidcConfigured === true);
           setOidcLoginLabel(data.oidcLoginLabel || "Sign in with OIDC");
@@ -124,7 +128,9 @@ export default function LoginPage() {
       description={
         authMode === "oidc" && oidcConfigured
           ? "Sign in with your OIDC provider to access the dashboard"
-          : "Enter your dashboard password to continue"
+          : !passwordConfigured
+            ? "Password login is not configured on this instance"
+            : "Enter your dashboard password to continue"
       }
       donateUrl={GITHUB_CONFIG.donateUrl}
       donateQrSrc="/images/paypal-donate-qr.svg"
@@ -142,6 +148,8 @@ export default function LoginPage() {
       retryAfter={retryAfter}
       loading={loading}
       hasPassword={hasPassword}
+      initialPasswordConfigured={initialPasswordConfigured}
+      passwordConfigured={passwordConfigured}
     />
   );
 }

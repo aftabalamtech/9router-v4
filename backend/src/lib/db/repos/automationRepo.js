@@ -5,27 +5,26 @@ import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 
 export async function listCodeBuddyAccounts() {
   const db = await getAdapter();
-  return db.all("SELECT * FROM codebuddyAccounts ORDER BY id DESC");
+  return await db.all("SELECT * FROM codebuddyAccounts ORDER BY id DESC");
 }
 
 export async function getCodeBuddyAccount(id) {
   const db = await getAdapter();
-  return db.get("SELECT * FROM codebuddyAccounts WHERE id = ?", [id]);
+  return await db.get("SELECT * FROM codebuddyAccounts WHERE id = ?", [id]);
 }
 
 export async function insertCodeBuddyAccount(email, password, profileDir, signupMethod = "google", ammailAlias = "", provider = "codebuddy") {
   const db = await getAdapter();
   const now = new Date().toISOString();
-  let resultId;
+  let resultId = null;
 
-  db.transaction(() => {
-    db.run(
+  await db.transaction(async () => {
+    const result = await db.run(
       `INSERT INTO codebuddyAccounts (email, password, profileDir, signupMethod, ammailAlias, provider, apiKeyStatus, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', ?) RETURNING id`,
       [email, password, profileDir, signupMethod, ammailAlias, provider, now]
     );
-    const row = db.get("SELECT last_insert_rowid() as id");
-    resultId = row ? row.id : null;
+    resultId = result.lastInsertRowid;
   });
 
   return resultId;
@@ -37,7 +36,7 @@ export async function bulkDeleteCodeBuddyAccounts(statuses, provider = null) {
   const placeholders = statuses.map(() => "?").join(",");
   
   let deletedRows = [];
-  db.transaction(() => {
+  await db.transaction(async () => {
     let selectQuery = `SELECT * FROM codebuddyAccounts WHERE apiKeyStatus IN (${placeholders})`;
     let params = [...statuses];
     if (provider) {
@@ -48,12 +47,12 @@ export async function bulkDeleteCodeBuddyAccounts(statuses, provider = null) {
       }
       params.push(provider);
     }
-    deletedRows = db.all(selectQuery, params);
+    deletedRows = await db.all(selectQuery, params);
     
     if (deletedRows.length > 0) {
       const idsPlaceholders = deletedRows.map(() => "?").join(",");
       const ids = deletedRows.map(r => r.id);
-      db.run(`DELETE FROM codebuddyAccounts WHERE id IN (${idsPlaceholders})`, ids);
+      await db.run(`DELETE FROM codebuddyAccounts WHERE id IN (${idsPlaceholders})`, ids);
     }
   });
 
@@ -63,10 +62,10 @@ export async function bulkDeleteCodeBuddyAccounts(statuses, provider = null) {
 export async function deleteCodeBuddyAccount(id) {
   const db = await getAdapter();
   let account = null;
-  db.transaction(() => {
-    account = db.get("SELECT * FROM codebuddyAccounts WHERE id = ?", [id]);
+  await db.transaction(async () => {
+    account = await db.get("SELECT * FROM codebuddyAccounts WHERE id = ?", [id]);
     if (account) {
-      db.run("DELETE FROM codebuddyAccounts WHERE id = ?", [id]);
+      await db.run("DELETE FROM codebuddyAccounts WHERE id = ?", [id]);
     }
   });
   return account;
@@ -75,22 +74,22 @@ export async function deleteCodeBuddyAccount(id) {
 export async function markCodeBuddyRunning(id) {
   const db = await getAdapter();
   const now = Math.floor(Date.now() / 1000);
-  db.run("UPDATE codebuddyAccounts SET apiKeyStatus = 'running', lastRunAt = ?, lastError = '' WHERE id = ?", [now, id]);
+  await db.run("UPDATE codebuddyAccounts SET apiKeyStatus = 'running', lastRunAt = ?, lastError = '' WHERE id = ?", [now, id]);
 }
 
 export async function markCodeBuddySuccess(id, apiKey) {
   const db = await getAdapter();
-  db.run("UPDATE codebuddyAccounts SET apiKeyStatus = 'ready', apiKey = ?, lastError = '' WHERE id = ?", [apiKey, id]);
+  await db.run("UPDATE codebuddyAccounts SET apiKeyStatus = 'ready', apiKey = ?, lastError = '' WHERE id = ?", [apiKey, id]);
 }
 
 export async function markCodeBuddyError(id, lastError) {
   const db = await getAdapter();
-  db.run("UPDATE codebuddyAccounts SET apiKeyStatus = 'failed', lastError = ? WHERE id = ?", [lastError, id]);
+  await db.run("UPDATE codebuddyAccounts SET apiKeyStatus = 'failed', lastError = ? WHERE id = ?", [lastError, id]);
 }
 
 export async function markCanvaEnrolled(id, value = 1) {
   const db = await getAdapter();
-  db.run("UPDATE codebuddyAccounts SET canvaEnrolled = ?, apiKeyStatus = 'enrolled_canva', lastError = '' WHERE id = ?", [value, id]);
+  await db.run("UPDATE codebuddyAccounts SET canvaEnrolled = ?, apiKeyStatus = 'enrolled_canva', lastError = '' WHERE id = ?", [value, id]);
 }
 
 // --- CodeBuddy Jobs ---
@@ -99,7 +98,7 @@ export async function createCodeBuddyJob(id, type, count) {
   const db = await getAdapter();
   const now = new Date().toISOString();
   const nowUnix = Math.floor(Date.now() / 1000);
-  db.run(
+  await db.run(
     `INSERT INTO codebuddyJobs (id, type, status, count, completed, success, failed, progress, resultsJson, createdAt, startedAt)
      VALUES (?, ?, 'running', ?, 0, 0, 0, 0, '[]', ?, ?)`,
     [id, type, count, now, nowUnix]
@@ -108,7 +107,7 @@ export async function createCodeBuddyJob(id, type, count) {
 
 export async function getCodeBuddyJob(id) {
   const db = await getAdapter();
-  const row = db.get("SELECT * FROM codebuddyJobs WHERE id = ?", [id]);
+  const row = await db.get("SELECT * FROM codebuddyJobs WHERE id = ?", [id]);
   if (!row) return null;
   return {
     ...row,
@@ -119,13 +118,13 @@ export async function getCodeBuddyJob(id) {
 export async function updateCodeBuddyJobStatus(id, status) {
   const db = await getAdapter();
   const nowUnix = Math.floor(Date.now() / 1000);
-  db.run("UPDATE codebuddyJobs SET status = ?, finishedAt = ? WHERE id = ?", [status, nowUnix, id]);
+  await db.run("UPDATE codebuddyJobs SET status = ?, finishedAt = ? WHERE id = ?", [status, nowUnix, id]);
 }
 
 export async function updateCodeBuddyJobResult(jobId, idx, result) {
   const db = await getAdapter();
-  db.transaction(() => {
-    const row = db.get("SELECT resultsJson, count FROM codebuddyJobs WHERE id = ?", [jobId]);
+  await db.transaction(async () => {
+    const row = await db.get("SELECT resultsJson, count FROM codebuddyJobs WHERE id = ?", [jobId]);
     if (!row) return;
 
     const results = parseJson(row.resultsJson, []);
@@ -150,7 +149,7 @@ export async function updateCodeBuddyJobResult(jobId, idx, result) {
     const count = row.count || 1;
     const progress = Math.min(100, Math.floor((completed / count) * 100));
 
-    db.run(
+    await db.run(
       `UPDATE codebuddyJobs SET resultsJson = ?, completed = ?, success = ?, failed = ?, progress = ? WHERE id = ?`,
       [stringifyJson(results), completed, success, failed, progress, jobId]
     );
@@ -162,7 +161,7 @@ export async function updateCodeBuddyJobResult(jobId, idx, result) {
 export async function insertAmmailOtp(data) {
   const db = await getAdapter();
   const receivedAt = Math.floor(Date.now() / 1000);
-  db.run(
+  await db.run(
     `INSERT INTO ammailOtps (address, alias, domain, sender, subject, otpCode, verifyUrl, bodyText, bodyHtml, messageShortId, rawEventJson, receivedAt, usedAt)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
     [
@@ -192,13 +191,13 @@ export async function findLatestAmmailOtp(address, sinceTs = 0, onlyUnused = tru
   }
 
   const sql = `SELECT * FROM ammailOtps WHERE ${where.join(" AND ")} ORDER BY receivedAt DESC LIMIT 1`;
-  return db.get(sql, params);
+  return await db.get(sql, params);
 }
 
 export async function markAmmailOtpUsed(id) {
   const db = await getAdapter();
   const nowUnix = Math.floor(Date.now() / 1000);
-  db.run("UPDATE ammailOtps SET usedAt = ? WHERE id = ?", [nowUnix, id]);
+  await db.run("UPDATE ammailOtps SET usedAt = ? WHERE id = ?", [nowUnix, id]);
 }
 
 export async function listAmmailOtps(filter = {}) {
@@ -220,17 +219,17 @@ export async function listAmmailOtps(filter = {}) {
   }
 
   const sql = `SELECT * FROM ammailOtps ${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY receivedAt DESC`;
-  return db.all(sql, params);
+  return await db.all(sql, params);
 }
 
 export async function getAmmailOtp(id) {
   const db = await getAdapter();
-  return db.get("SELECT * FROM ammailOtps WHERE id = ?", [id]);
+  return await db.get("SELECT * FROM ammailOtps WHERE id = ?", [id]);
 }
 
 export async function deleteAmmailOtp(id) {
   const db = await getAdapter();
-  db.run("DELETE FROM ammailOtps WHERE id = ?", [id]);
+  await db.run("DELETE FROM ammailOtps WHERE id = ?", [id]);
 }
 
 export async function deleteAmmailOtpsBulk(filter = {}) {
@@ -257,5 +256,5 @@ export async function deleteAmmailOtpsBulk(filter = {}) {
   }
 
   const sql = `DELETE FROM ammailOtps${where.length ? ` WHERE ${where.join(" AND ")}` : ""}`;
-  db.run(sql, params);
+  await db.run(sql, params);
 }

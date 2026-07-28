@@ -47,6 +47,8 @@ interface SignInPageProps {
   retryAfter?: number;
   loading?: boolean;
   hasPassword?: boolean;
+  initialPasswordConfigured?: boolean;
+  passwordConfigured?: boolean;
 }
 
 // --- SUB-COMPONENTS ---
@@ -114,6 +116,8 @@ export const SignInPage: React.FC<SignInPageProps> = ({
   retryAfter = 0,
   loading = false,
   hasPassword = true,
+  initialPasswordConfigured = false,
+  passwordConfigured = true,
 }) => {
   const [showPassword, setShowPassword] = useState(false);
 
@@ -168,29 +172,33 @@ export const SignInPage: React.FC<SignInPageProps> = ({
                   )}
                   {resetHint && (
                     <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1.5 leading-relaxed">
-                      Forgot password? Open <code className="bg-zinc-100 dark:bg-zinc-800 px-1 rounded font-mono">9router</code> CLI on the host → <b>Settings</b> → <b>Reset Password to Default</b>.
+                      {resetHint}
                     </p>
                   )}
                 </div>
 
                 <button
                   type="submit"
-                  disabled={loading || retryAfter > 0}
+                  disabled={loading || retryAfter > 0 || !passwordConfigured}
                   className="animate-element animate-delay-600 w-full rounded-2xl bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-50 dark:hover:bg-zinc-200 py-4 font-medium text-zinc-50 dark:text-zinc-900 transition-colors disabled:opacity-50 cursor-pointer"
                 >
-                  {loading ? "Logging in..." : retryAfter > 0 ? `Wait ${retryAfter}s` : "Login"}
+                  {loading ? "Logging in..." : retryAfter > 0 ? `Wait ${retryAfter}s` : !passwordConfigured ? "Password not configured" : "Login"}
                 </button>
 
-                <div className="animate-element animate-delay-650 text-center space-y-1.5">
-                  <p className="text-xs text-zinc-400">
-                    Default password is <code className="bg-zinc-100 dark:bg-zinc-850 px-1 rounded font-mono">123456</code>
-                  </p>
-                  {hasPassword === false && (
-                    <p className="text-xs text-zinc-500 italic">
-                      No custom password is set yet. The default password above will work.
-                    </p>
-                  )}
-                </div>
+                {(hasPassword === false || !passwordConfigured) && (
+                  <div className="animate-element animate-delay-650 text-center space-y-1.5">
+                    {initialPasswordConfigured && (
+                      <p className="text-xs text-zinc-500 italic">
+                        Use the initial password configured through <code className="bg-zinc-100 dark:bg-zinc-850 px-1 rounded font-mono">INITIAL_PASSWORD</code>.
+                      </p>
+                    )}
+                    {!passwordConfigured && (
+                      <p className="text-xs text-zinc-500 italic">
+                        Set <code className="bg-zinc-100 dark:bg-zinc-850 px-1 rounded font-mono">INITIAL_PASSWORD</code> on the host, then restart the service.
+                      </p>
+                    )}
+                  </div>
+                )}
               </form>
             )}
 

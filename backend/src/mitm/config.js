@@ -1,5 +1,3 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 // All intercepted domains + URL patterns per tool
 
 const fs = require("fs");

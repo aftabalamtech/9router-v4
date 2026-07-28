@@ -19,6 +19,7 @@ export async function createSqlJsAdapter(filePath) {
 
   let dirty = false;
   let saveTimer = null;
+  let transactionDepth = 0;
   const SAVE_DEBOUNCE_MS = 100;
 
   function persist() {
@@ -29,10 +30,11 @@ export async function createSqlJsAdapter(filePath) {
 
   function scheduleSave() {
     dirty = true;
+    if (transactionDepth > 0) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      if (dirty) {
+      if (dirty && transactionDepth === 0) {
         try { persist(); } catch (e) { console.error("[sqljs] save failed:", e); }
       }
     }, SAVE_DEBOUNCE_MS);
@@ -82,6 +84,12 @@ export async function createSqlJsAdapter(filePath) {
 
   function exec(sql) {
     db.exec(sql);
+    const statement = sql.trim().toUpperCase();
+    if (statement.startsWith("SAVEPOINT ")) {
+      transactionDepth++;
+    } else if (statement.startsWith("RELEASE ")) {
+      transactionDepth = Math.max(0, transactionDepth - 1);
+    }
     scheduleSave();
   }
 

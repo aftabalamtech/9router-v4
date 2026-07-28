@@ -118,8 +118,8 @@ export async function GET(req, res) {
     // Heal dangling running state for jobs & accounts when no job is active in memory
     if (!activeJobId) {
       try {
-        db.run("UPDATE codebuddyAccounts SET apiKeyStatus = 'failed', lastError = 'Job stopped or was interrupted.' WHERE apiKeyStatus = 'running'");
-        const lastJob = db.get("SELECT * FROM codebuddyJobs ORDER BY createdAt DESC LIMIT 1");
+        await db.run("UPDATE codebuddyAccounts SET apiKeyStatus = 'failed', lastError = 'Job stopped or was interrupted.' WHERE apiKeyStatus = 'running'");
+        const lastJob = await db.get("SELECT * FROM codebuddyJobs ORDER BY createdAt DESC LIMIT 1");
         if (lastJob) {
           let results = [];
           try {
@@ -136,7 +136,7 @@ export async function GET(req, res) {
           }
           const newStatus = lastJob.status === "running" ? "stopped" : lastJob.status;
           if (lastJob.status === "running" || modified) {
-            db.run(
+            await db.run(
               "UPDATE codebuddyJobs SET status = ?, resultsJson = ? WHERE id = ?",
               [newStatus, JSON.stringify(results), lastJob.id]
             );
@@ -169,7 +169,7 @@ export async function GET(req, res) {
     } else {
       // Get the last job from DB to show completion stats
       try {
-        const job = db.get("SELECT * FROM codebuddyJobs WHERE status != 'dismissed' ORDER BY createdAt DESC LIMIT 1");
+        const job = await db.get("SELECT * FROM codebuddyJobs WHERE status != 'dismissed' ORDER BY createdAt DESC LIMIT 1");
         if (job) {
           let results = [];
           try {
@@ -577,7 +577,7 @@ export async function POST_handler(req, res) {
         const { getAdapter } = await import("../../../lib/db/driver.js");
         const db = await getAdapter();
         // Update all completed/failed/stopped jobs to dismissed
-        db.run(
+        await db.run(
           "UPDATE codebuddyJobs SET status = 'dismissed' WHERE status IN ('completed', 'failed', 'stopped', 'error')"
         );
         // Also clear memory state if no job is actually running

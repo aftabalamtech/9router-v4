@@ -1,10 +1,3 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-import { fileURLToPath } from "url";
-import { dirname } from "path";
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
 const { exec, spawn, execSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -836,22 +829,22 @@ async function trustCert(sudoPassword) {
 const startMitm = startServer;
 const stopMitm = stopServer;
 
-export { getMitmStatus };
-export { startServer };
-export { stopServer };
-export { enableToolDNS };
-export { disableToolDNS };
-export { trustCert };
-export { // Legacy
-  startMitm };
-export { stopMitm };
-export { getCachedPassword };
-export { setCachedPassword };
-export { loadEncryptedPassword };
-export { clearEncryptedPassword };
-export { isSudoPasswordRequired };
-export { initDbHooks };
-export { restoreToolDNS };
-export { hasDnsPrivilege };
-export { removeAllDNSEntriesSync };
-export {  };;
+module.exports = {
+  getMitmStatus,
+  startServer,
+  stopServer,
+  enableToolDNS,
+  disableToolDNS,
+  trustCert,
+  startMitm,
+  stopMitm,
+  getCachedPassword,
+  setCachedPassword,
+  loadEncryptedPassword,
+  clearEncryptedPassword,
+  isSudoPasswordRequired,
+  initDbHooks,
+  restoreToolDNS,
+  hasDnsPrivilege,
+  removeAllDNSEntriesSync,
+};

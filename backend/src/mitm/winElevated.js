@@ -1,5 +1,3 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 const { exec, execSync } = require("child_process");
 
 const IS_WIN = process.platform === "win32";

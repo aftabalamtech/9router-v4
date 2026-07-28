@@ -1,5 +1,3 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 const { log, err } = require("../logger");
 
 const DEFAULT_LOCAL_ROUTER = "http://localhost:3001";

@@ -72,6 +72,10 @@ async function start() {
     apiRouter(req, res, next);
   });
 
+  app.use(["/api", "/v1", "/v1beta"], (_req, res) => {
+    res.status(404).json({ error: "Not found" });
+  });
+
   // Serve the production SPA from the same origin as the API.
   app.use(express.static(FRONTEND_DIST, { index: false, redirect: false }));
   app.use((req, res, next) => {

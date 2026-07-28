@@ -1343,7 +1343,7 @@ async function getCodeBuddyUsage(connection, proxyOptions = null) {
       nextDay.setDate(nextDay.getDate() + 1);
       const resetAt = nextDay.toISOString();
 
-      const rows = db.all(
+      const rows = await db.all(
         `SELECT id FROM usageHistory WHERE connectionId = ? AND timestamp >= ?`,
         [connection.id, cutoff]
       );
@@ -1413,7 +1413,7 @@ async function getCodeBuddyUsage(connection, proxyOptions = null) {
         nextDay.setDate(nextDay.getDate() + 1);
         const resetAt = nextDay.toISOString();
 
-        const rows = db.all(
+        const rows = await db.all(
           `SELECT id FROM usageHistory WHERE connectionId = ? AND timestamp >= ?`,
           [connection.id, cutoff]
         );

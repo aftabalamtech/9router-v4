@@ -5,7 +5,7 @@ import { setDashboardAuthCookie } from "../../../lib/auth/dashboardSession.js";
 import { isOidcConfigured } from "../../../lib/auth/oidc.js";
 import { checkLock, recordFail, recordSuccess, getClientIp } from "../../../lib/auth/loginLimiter.js";
 
-const RESET_HINT = "Forgot password? Reset to default via 9Router CLI → Settings → Reset Password to Default.";
+const RESET_HINT = "Forgot password? Restore access from the host by updating the dashboard authentication settings.";
 
 function isTunnelRequest(req, settings) {
   const host = (req.headers["host"] || "").split(":")[0].toLowerCase();
@@ -21,7 +21,7 @@ export async function POST_handler(req, res) {
     if (lock.locked) {
       res.setHeader("Retry-After", String(lock.retryAfter));
       return res.status(429).json({ 
-        error: `Too many failed attempts. Try again in ${lock.retryAfter}s. ${RESET_HINT}`, 
+        error: `Too many failed attempts. Try again in ${lock.retryAfter}s.`,
         retryAfter: lock.retryAfter, 
         resetHint: RESET_HINT 
       });
@@ -35,7 +35,6 @@ export async function POST_handler(req, res) {
       return res.status(403).json({ error: "Dashboard access via tunnel is disabled" });
     }
 
-    // Default password is '123456' if not set
     const storedHash = settings.password;
 
     if (settings.authMode === "oidc" && isOidcConfigured(settings)) {
@@ -46,8 +45,12 @@ export async function POST_handler(req, res) {
     if (storedHash) {
       isValid = await bcrypt.compare(password, storedHash);
     } else {
-      // Use env var or default
-      const initialPassword = process.env.INITIAL_PASSWORD || "123456";
+      const initialPassword = process.env.INITIAL_PASSWORD;
+      if (!initialPassword) {
+        return res.status(503).json({
+          error: "Dashboard password is not configured. Set INITIAL_PASSWORD or configure a password locally.",
+        });
+      }
       isValid = password === initialPassword;
     }
 
@@ -63,7 +66,7 @@ export async function POST_handler(req, res) {
     if (postLock.locked) {
       res.setHeader("Retry-After", String(postLock.retryAfter));
       return res.status(429).json({ 
-        error: `Too many failed attempts. Try again in ${postLock.retryAfter}s. ${RESET_HINT}`, 
+        error: `Too many failed attempts. Try again in ${postLock.retryAfter}s.`,
         retryAfter: postLock.retryAfter, 
         resetHint: RESET_HINT 
       });

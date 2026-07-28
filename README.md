@@ -46,7 +46,7 @@ V3 does not claim authorship of the routing engine or provider integrations. Tho
 - **Multi-provider routing** with load balancing, fallback, and key rotation.
 - **Modern dashboard** for providers, connections, proxy pools, CLI tools, automation, usage, and security settings.
 - **Password and OIDC authentication** for dashboard access.
-- **SQLite persistence** without an external database service.
+- **SQLite or PostgreSQL persistence**, selected automatically through `DATABASE_URL`.
 - **Cloudflare Workers AI automation** with Playwright, CAPTCHA providers, and temporary email.
 - **Agent Skills** for Claude, Gemini, Codex, and other coding agents.
 - **Portable deployment** for local machines, Docker, Railway, Heroku, and Linux VPS hosts.
@@ -60,7 +60,7 @@ V3 does not claim authorship of the routing engine or provider integrations. Tho
 ├── backend/
 │   └── src/
 │       ├── routes/       # API and auto-routed endpoints
-│       ├── lib/db/       # SQLite repositories
+│       ├── lib/db/       # SQLite/PostgreSQL repositories and adapters
 │       └── automation/   # Browser automation
 ├── frontend/
 │   ├── public/branding/  # V3 logo and favicon
@@ -82,9 +82,10 @@ Start from [`backend/.env.example`](./backend/.env.example). The main runtime va
 | Variable | Purpose |
 |---|---|
 | `JWT_SECRET` | Signs dashboard sessions |
-| `INITIAL_PASSWORD` | Initial dashboard password |
+| `INITIAL_PASSWORD` | Initial dashboard password; required until a password is stored |
 | `API_KEY_SECRET` | Signs generated API keys |
-| `DATA_DIR` | Stores SQLite data, logs, and runtime files |
+| `DATABASE_URL` | Optional PostgreSQL connection string; when set, PostgreSQL replaces SQLite |
+| `DATA_DIR` | Stores SQLite data, logs, and runtime files; still used for non-database runtime files with PostgreSQL |
 | `NODE_ENV` | Use `production` outside local development |
 | `PORT` | HTTP port; most PaaS providers inject this automatically |
 
@@ -175,7 +176,7 @@ git push heroku main
 
 Heroku injects `PORT` automatically.
 
-> Heroku's dyno filesystem is ephemeral. SQLite data stored inside the dyno can disappear after restarts or redeployments. Use Heroku for testing unless you add an appropriate persistent-storage strategy.
+> Heroku's dyno filesystem is ephemeral. Set `DATABASE_URL` to a managed PostgreSQL database for persistent application data, or use Heroku only for testing with SQLite.
 
 ### Deploy to Railway
 
@@ -185,10 +186,16 @@ Heroku injects `PORT` automatically.
 
 1. Create a service from this repository.
 2. Copy variables from `backend/.env.example` into the **Variables** tab.
-3. Attach a Railway Volume at `/data`.
+3. Add a Railway PostgreSQL service and expose its `DATABASE_URL` to 9Router, or attach a Railway Volume at `/data` to keep using SQLite.
 4. Generate a public domain under **Settings → Networking**.
 
 Railway builds the included Dockerfile. It supplies `RAILWAY_PUBLIC_DOMAIN`, `RAILWAY_PRIVATE_DOMAIN`, and `PORT` automatically. The Dockerfile intentionally omits the unsupported Docker `VOLUME` instruction.
+
+### Switching Between SQLite and PostgreSQL
+
+- Without `DATABASE_URL`, 9Router uses SQLite at `DATA_DIR/db/data.sqlite`.
+- With a non-empty `DATABASE_URL`, 9Router initializes and uses PostgreSQL.
+- SQLite and PostgreSQL are separate data stores. Before switching an existing installation, export the database from the dashboard, set or remove `DATABASE_URL`, restart, then import the exported data.
 
 ---
 

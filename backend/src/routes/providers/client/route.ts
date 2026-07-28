@@ -104,7 +104,7 @@ async function getTodayUsageMap(connectionIds) {
     startOfDay.setHours(0, 0, 0, 0);
     const cutoff = startOfDay.toISOString();
 
-    const rows = db.all(
+    const rows = await db.all(
       `SELECT connectionId, COUNT(*) as count
        FROM usageHistory
        WHERE timestamp >= ? AND connectionId IN (${connectionIds.map(() => "?").join(",")})

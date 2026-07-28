@@ -1,5 +1,3 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 const { err } = require("../logger");
 const { fetchRouter, pipeSSE } = require("./base");
 

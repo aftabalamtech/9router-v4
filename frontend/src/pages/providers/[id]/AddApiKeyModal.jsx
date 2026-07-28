@@ -86,6 +86,14 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
 
   const handleValidate = async () => {
     setValidating(true);
+    let settled = false;
+    const fallbackId = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      setValidationResult("failed");
+      setValidationError("Validation timeout (>15s)");
+      setValidating(false);
+    }, VALIDATION_TIMEOUT_MS + 500);
     try {
       const data = await fetchValidation({
         provider,
@@ -93,13 +101,18 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         defaultModel: formData.defaultModel.trim() || undefined,
         providerSpecificData: buildProviderSpecificData(),
       });
+      if (settled) return;
+      settled = true;
       setValidationResult(data.valid ? "success" : "failed");
       setValidationError(data.valid ? "" : (data.error || "Validation failed"));
     } catch (error) {
+      if (settled) return;
+      settled = true;
       setValidationResult("failed");
       setValidationError(error.name === "AbortError" ? "Validation timeout (>15s)" : "Network error");
     } finally {
-      setValidating(false);
+      window.clearTimeout(fallbackId);
+      if (settled) setValidating(false);
     }
   };
 
