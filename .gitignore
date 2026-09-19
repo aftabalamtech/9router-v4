@@ -32,4 +32,5 @@ out/
 backend/profiles/
 backend/canva_debug/
 backend/src/automation/profiles/
+backend/data/
 har/

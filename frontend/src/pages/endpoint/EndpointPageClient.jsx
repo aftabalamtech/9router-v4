@@ -445,9 +445,9 @@ export default function APIPageClient({ machineId }) {
     try {
       const res = await fetch("/api/tunnel/enable", { method: "POST" });
       polling = false;
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setTunnelStatus({ type: "error", message: data.error || "Failed to enable tunnel" });
+        setTunnelStatus({ type: "error", message: data.error || `Failed to enable tunnel (HTTP ${res.status})` });
         return;
       }
 

@@ -5,17 +5,19 @@ import { Card, Button, Modal } from "@/shared/components";
 import { getModelsByProviderId } from "@/shared/constants/models";
 import { getProviderAlias } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import ModelBatchTest from "./ModelBatchTest";
 
 // ── ModelRow ───────────────────────────────────────────────────
 export function ModelRow({ model, fullModel, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting }) {
   const borderColor = testStatus === "ok" ? "border-green-500/40" : testStatus === "error" ? "border-red-500/40" : "border-border";
   const iconColor = testStatus === "ok" ? "#22c55e" : testStatus === "error" ? "#ef4444" : undefined;
+  const icon = testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : isTesting ? "progress_activity" : "smart_toy";
 
   return (
     <div className={`group px-3 py-2 rounded-lg border ${borderColor} hover:bg-sidebar/50`}>
       <div className="flex items-center gap-2">
-        <span className="material-symbols-outlined text-base" style={iconColor ? { color: iconColor } : undefined}>
-          {testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : "smart_toy"}
+        <span className="material-symbols-outlined text-base" style={iconColor ? { color: iconColor } : isTesting ? { animation: "spin 1s linear infinite" } : undefined}>
+          {icon}
         </span>
         <div className="flex flex-col gap-1">
           <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{fullModel}</code>
@@ -57,7 +59,7 @@ ModelRow.propTypes = {
   fullModel: PropTypes.string.isRequired,
   copied: PropTypes.string,
   onCopy: PropTypes.func.isRequired,
-  testStatus: PropTypes.oneOf(["ok", "error"]),
+  testStatus: PropTypes.oneOf(["ok", "error", "testing"]),
   isCustom: PropTypes.bool,
   isFree: PropTypes.bool,
   onDeleteAlias: PropTypes.func,
@@ -113,6 +115,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
   const [customModels, setCustomModels] = useState([]);
   const [modelTestResults, setModelTestResults] = useState({});
   const [testingModelId, setTestingModelId] = useState(null);
+  const [batchTestingIds, setBatchTestingIds] = useState([]);
   const [testError, setTestError] = useState("");
   const [showAddCustomModel, setShowAddCustomModel] = useState(false);
   const [connections, setConnections] = useState([]);
@@ -137,6 +140,26 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
   }, [providerId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  // Load last persisted batch results (survive reloads)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/models/test-results?providerAlias=${encodeURIComponent(providerAlias)}`, { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const mapped = {};
+        for (const [fullModel, r] of Object.entries(data.results || {})) {
+          const id = fullModel.includes("/") ? fullModel.split("/").pop() : fullModel;
+          if (r?.status === "passed") mapped[id] = "ok";
+          else if (r?.status === "failed" || r?.status === "timeout") mapped[id] = "error";
+        }
+        if (!cancelled) setModelTestResults((prev) => ({ ...mapped, ...prev }));
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [providerAlias]);
 
   const handleSetAlias = async (modelId, alias) => {
     const fullModel = `${providerAlias}/${modelId}`;
@@ -182,6 +205,20 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
     } catch (e) { console.log("delete custom model error:", e); }
   };
 
+  const handleBatchResult = useCallback((fullModelId, status) => {
+    // Strip the known provider-alias prefix (model ids may contain slashes).
+    const prefix = `${providerAlias}/`;
+    const modelId = fullModelId.startsWith(prefix)
+      ? fullModelId.slice(prefix.length)
+      : fullModelId;
+    if (status === "testing") {
+      setBatchTestingIds((prev) => (prev.includes(modelId) ? prev : [...prev, modelId]));
+      return;
+    }
+    setBatchTestingIds((prev) => prev.filter((id) => id !== modelId));
+    setModelTestResults((prev) => ({ ...prev, [modelId]: status }));
+  }, []);
+
   const handleTestModel = async (modelId) => {
     if (testingModelId) return;
     setTestingModelId(modelId);
@@ -217,6 +254,10 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
   );
 
   const displayModels = builtInModels;
+  const batchModels = [
+    ...displayModels.map((m) => ({ id: m.id, fullModel: `${providerAlias}/${m.id}`, kind: effectiveType, isFree: !!m.isFree })),
+    ...myCustomModels.map((m) => ({ id: m.id, fullModel: `${providerAlias}/${m.id}`, kind: m.type || effectiveType, isFree: false })),
+  ];
 
   return (
     <>
@@ -225,6 +266,13 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
           <h2 className="text-lg font-semibold">Models{kindFilter ? ` — ${kindFilter.toUpperCase()}` : ""}</h2>
         </div>
         {testError && <p className="text-xs text-red-500 mb-3 break-words">{testError}</p>}
+
+        <ModelBatchTest
+          models={batchModels}
+          disabled={connections.length === 0}
+          testResults={modelTestResults}
+          onResult={handleBatchResult}
+        />
 
         <div className="flex flex-wrap gap-3">
           {displayModels.map((model) => {
@@ -242,7 +290,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
                 onDeleteAlias={() => handleDeleteAlias(existingAlias)}
                 testStatus={modelTestResults[model.id]}
                 onTest={connections.length > 0 ? () => handleTestModel(model.id) : undefined}
-                isTesting={testingModelId === model.id}
+                isTesting={testingModelId === model.id || batchTestingIds.includes(model.id)}
                 isFree={model.isFree}
               />
             );
@@ -259,7 +307,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
               onDeleteAlias={() => handleDeleteCustomModel(model.id)}
               testStatus={modelTestResults[model.id]}
               onTest={connections.length > 0 ? () => handleTestModel(model.id) : undefined}
-              isTesting={testingModelId === model.id}
+              isTesting={testingModelId === model.id || batchTestingIds.includes(model.id)}
               isCustom
             />
           ))}

@@ -80,7 +80,9 @@ async function start() {
   app.use(express.static(FRONTEND_DIST, { index: false, redirect: false }));
   app.use((req, res, next) => {
     if (req.method === "GET" && req.accepts("html")) {
-      return res.sendFile(path.join(FRONTEND_DIST, "index.html"));
+      return res.sendFile(path.join(FRONTEND_DIST, "index.html"), (err) => {
+        if (err && !res.headersSent) return next();
+      });
     }
     return next();
   });

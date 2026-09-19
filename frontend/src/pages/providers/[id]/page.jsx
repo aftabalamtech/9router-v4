@@ -17,6 +17,8 @@ import AddApiKeyModal from "./AddApiKeyModal";
 import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import LeonardoAdminPanel from "./LeonardoAdminPanel";
+import ModelBatchTest from "../components/ModelBatchTest";
+import ModelSyncPanel from "./ModelSyncPanel";
 
 const ONE_BY_ONE_DELAY_MS = 1000;
 
@@ -45,6 +47,7 @@ export default function ProviderDetailPage() {
   const [modelTestResults, setModelTestResults] = useState({});
   const [modelsTestError, setModelsTestError] = useState("");
   const [testingModelId, setTestingModelId] = useState(null);
+  const [batchTestingIds, setBatchTestingIds] = useState([]);
   const [showAddCustomModel, setShowAddCustomModel] = useState(false);
   const [selectedConnectionIds, setSelectedConnectionIds] = useState([]);
   const [bulkProxyPoolId, setBulkProxyPoolId] = useState("__none__");
@@ -874,14 +877,14 @@ export default function ProviderDetailPage() {
     </Modal>
   );
 
-  const handleTestModel = async (modelId) => {
+  const handleTestModel = async (modelId, kind = "llm") => {
     if (testingModelId) return;
     setTestingModelId(modelId);
     try {
       const res = await fetch("/api/models/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: `${providerStorageAlias}/${modelId}` }),
+        body: JSON.stringify({ model: `${providerStorageAlias}/${modelId}`, kind }),
       });
       const data = await res.json();
       setModelTestResults((prev) => ({ ...prev, [modelId]: data.ok ? "ok" : "error" }));
@@ -893,6 +896,20 @@ export default function ProviderDetailPage() {
       setTestingModelId(null);
     }
   };
+
+  const handleBatchResult = useCallback((fullModelId, status) => {
+    // Strip the known storage-alias prefix (model ids themselves may contain slashes).
+    const prefix = `${providerStorageAlias}/`;
+    const modelId = fullModelId.startsWith(prefix)
+      ? fullModelId.slice(prefix.length)
+      : fullModelId;
+    if (status === "testing") {
+      setBatchTestingIds((prev) => (prev.includes(modelId) ? prev : [...prev, modelId]));
+      return;
+    }
+    setBatchTestingIds((prev) => prev.filter((id) => id !== modelId));
+    setModelTestResults((prev) => ({ ...prev, [modelId]: status }));
+  }, []);
 
   const renderModelsSection = () => {
     if (isCompatible) {
@@ -968,8 +985,8 @@ export default function ProviderDetailPage() {
           onSetAlias={(alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
           onDeleteAlias={() => handleDeleteAlias(existingAlias)}
           testStatus={modelTestResults[model.id]}
-          onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
-          isTesting={testingModelId === model.id}
+          onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id, model.type || "llm") : undefined}
+          isTesting={testingModelId === model.id || batchTestingIds.includes(model.id)}
           isFree={model.isFree}
           onDisable={() => handleDisableModel(model.id)}
         />
@@ -1001,6 +1018,13 @@ export default function ProviderDetailPage() {
         {customModels.length > 0 && (
           <>
             {hasMultipleKinds && <SectionHeader icon="star" label="Custom" count={customModels.length} />}
+            <ModelBatchTest
+              models={customModels.map((m) => ({ id: m.id, fullModel: `${providerStorageAlias}/${m.id}`, kind: "llm", isFree: false }))}
+              disabled={connections.length === 0 && !isFreeNoAuth}
+              testResults={modelTestResults}
+              onResult={handleBatchResult}
+              scopeLocked
+            />
             <div className="flex flex-wrap gap-3">
               {customModels.map((model) => (
                 <ModelRow
@@ -1014,7 +1038,7 @@ export default function ProviderDetailPage() {
                   onDeleteAlias={() => handleDeleteAlias(model.alias)}
                   testStatus={modelTestResults[model.id]}
                   onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
-                  isTesting={testingModelId === model.id}
+                  isTesting={testingModelId === model.id || batchTestingIds.includes(model.id)}
                   isCustom
                   isFree={false}
                 />
@@ -1638,6 +1662,18 @@ export default function ProviderDetailPage() {
         </div>
         {!!modelsTestError && (
           <p className="text-xs text-red-500 mb-3 break-words">{modelsTestError}</p>
+        )}
+        {!isCompatible && (
+          <ModelSyncPanel
+            providerId={providerId}
+            providerStorageAlias={providerStorageAlias}
+            providerLabel={providerInfo?.name}
+            connections={connections}
+            modelAliases={modelAliases}
+            hardcodedIds={models.map((m) => m.id)}
+            onAddModel={(modelId) => handleSetAlias(modelId, modelId.split("/").pop(), providerStorageAlias)}
+            onCatalogChanged={() => { fetchAliases(); }}
+          />
         )}
         {renderModelsSection()}
       </Card>

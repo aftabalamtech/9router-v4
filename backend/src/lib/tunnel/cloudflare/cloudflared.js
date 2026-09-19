@@ -6,7 +6,7 @@ import { execSync, spawn } from "child_process";
 import { savePid, loadPid, clearPid } from "./pid.js";
 import { DATA_DIR } from "../../../lib/dataDir.js";
 
-const BIN_DIR = path.join(DATA_DIR, "bin");
+const BIN_DIR = path.resolve(DATA_DIR, "bin");
 const BINARY_NAME = "cloudflared";
 const IS_WINDOWS = os.platform() === "win32";
 const BIN_NAME = IS_WINDOWS ? `${BINARY_NAME}.exe` : BINARY_NAME;

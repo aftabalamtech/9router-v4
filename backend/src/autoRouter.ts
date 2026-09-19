@@ -33,11 +33,16 @@ function hasCatchAll(pathPart: string): boolean {
 }
 
 function toCatchAllRegex(pathPart: string): RegExp {
-  const base = pathPart
-    .replace(/\[\.\.\.([^\]]+)\]/g, "(.*)")
-    .replace(/\[([^\]]+)\]/g, "[^/]+")
-    .replace(/\//g, "\\/");
-  return new RegExp(`^\/${base}$`);
+  const normalized = pathPart.replace(/\\/g, "/");
+  const base = normalized
+    .split("/")
+    .map((seg) => {
+      if (/^\[\.\.\.[^\]]+\]$/.test(seg)) return "(.*)";
+      if (/^\[[^\]]+\]$/.test(seg)) return "[^/]+";
+      return seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    })
+    .join("\\/");
+  return new RegExp(`^\\/${base}$`);
 }
 
 /**
@@ -84,15 +89,15 @@ export async function buildAutoRouter(): Promise<Router> {
   const router = Router();
   const routeFiles = findRouteFiles(ROUTES_DIR);
   routeFiles.sort((a, b) => {
-    const relA = relative(ROUTES_DIR, a);
-    const relB = relative(ROUTES_DIR, b);
+    const relA = relative(ROUTES_DIR, a).replace(/\\/g, "/");
+    const relB = relative(ROUTES_DIR, b).replace(/\\/g, "/");
     return compareRoutePaths(relA, relB);
   });
   let mounted = 0;
   const importFailures: string[] = [];
 
   for (const file of routeFiles) {
-    const rel = relative(ROUTES_DIR, file);
+    const rel = relative(ROUTES_DIR, file).replace(/\\/g, "/");
     const pathPart = rel.replace(/\/route\.[jt]s$/, "");
     const isCatchAll = hasCatchAll(pathPart);
     const expressPath: string | RegExp = isCatchAll
@@ -184,7 +189,7 @@ export async function buildAutoRouter(): Promise<Router> {
 
   if (process.env.DEBUG_ROUTES) {
     console.log('[router] Mounted paths:', routeFiles.map(f => {
-      const rel = relative(ROUTES_DIR, f);
+      const rel = relative(ROUTES_DIR, f).replace(/\\/g, "/");
       const pp = rel.replace(/\/route\.[jt]s$/, '');
       return '/' + pp.split('/').map(nextToExpress).join('/');
     }));

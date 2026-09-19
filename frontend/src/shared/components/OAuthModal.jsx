@@ -24,6 +24,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
   // State for client-only values to avoid hydration mismatch
   const [isLocalhost, setIsLocalhost] = useState(false);
   const [placeholderUrl, setPlaceholderUrl] = useState("/callback?code=...");
+  const [manifest, setManifest] = useState(null);
   const callbackProcessedRef = useRef(false);
 
   // Detect if running on localhost (client-side only)
@@ -35,6 +36,23 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       setPlaceholderUrl(`${window.location.origin}/callback?code=...`);
     }
   }, []);
+
+  // Registry manifest: provider notice + docs link (no secrets — public metadata)
+  useEffect(() => {
+    if (!isOpen || !provider) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/oauth/providers?id=${encodeURIComponent(provider)}`, { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const data = await res.json().catch(() => ({}));
+        if (!cancelled) setManifest(data.provider || null);
+      } catch {
+        if (!cancelled) setManifest(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isOpen, provider]);
 
   // Define all useCallback hooks BEFORE the useEffects that reference them
 
@@ -555,6 +573,17 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
   return (
     <Modal isOpen={isOpen} title={modalTitle} onClose={handleClose} size="lg">
       <div className="flex flex-col gap-4">
+        {manifest?.notice && (
+          <div className="flex items-start gap-2 px-3 py-2 border border-amber-500/40 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400">
+            <span className="material-symbols-outlined text-base shrink-0">warning</span>
+            <p className="text-xs whitespace-pre-line">{manifest.notice}</p>
+          </div>
+        )}
+        {manifest?.docsUrl && (
+          <a href={manifest.docsUrl} target="_blank" rel="noreferrer" className="text-xs text-primary hover:underline w-fit">
+            Provider documentation
+          </a>
+        )}
         {/* Waiting + Manual Input combined (non-device-code) */}
         {(step === "waiting" || step === "input") && !isDeviceCode && (
           <>
