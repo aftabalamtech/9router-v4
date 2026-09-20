@@ -44,19 +44,23 @@ export function getTestStatus(fullModel, testResults) {
   return "untested";
 }
 
-export function isWorkingModel(fullModel, testResults, blocksMap) {
+export function isWorkingModel(fullModel, testResults, blocksMap, hiddenMap) {
   if (getTestStatus(fullModel, testResults) !== "ok") return false;
   const { alias, id } = splitFullModel(fullModel);
-  return !isModelBlocked(alias, alias, id, blocksMap);
+  if (isModelBlocked(alias, alias, id, blocksMap)) return false;
+  if (isModelHidden(alias, alias, id, hiddenMap)) return false;
+  return true;
 }
 
 // Status filter shared by the Models page. Combines with the existing
 // visibility filter via AND — except "disabled", which shows all blocked
 // models even if they are also hidden.
+// Shared working definition (same as GET /api/models/working):
+// working = latest test passed AND NOT hidden AND NOT blocked.
 export function matchesStatusFilter({ testStatus, hidden, blocked }, statusFilter) {
   switch (statusFilter) {
     case "working":
-      return testStatus === "ok" && !blocked;
+      return testStatus === "ok" && !hidden && !blocked;
     case "error":
       return testStatus === "error";
     case "hidden":

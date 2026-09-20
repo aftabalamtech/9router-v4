@@ -59,6 +59,11 @@ function resolveCustomRequest(raw, selectedAlias, knownPrefixes) {
 
 const ALL_PROVIDERS = "__all__";
 
+// Live resolvers that already return dashboard-routed full ids
+// ("alias/upstream") instead of raw upstream ids. Every other resolver
+// returns raw upstream ids that must be prefixed (see loader).
+const LIVE_IDS_ALREADY_ROUTED = new Set(["qoder"]);
+
 // Searchable dropdown (button + popover with filter input), theme-matched.
 function SearchableDropdown({ label, placeholder, searchPlaceholder, value, options, onPick, disabled, hint }) {
   const [open, setOpen] = useState(false);
@@ -137,6 +142,7 @@ export default function PlaygroundPage() {
   const [modelMode, setModelMode] = useState("select"); // "select" | "custom"
   const [customModelId, setCustomModelId] = useState("");
   const [workingOnly, setWorkingOnly] = useState(false);
+  const [workingList, setWorkingList] = useState(null); // canonical GET /api/models/working or null
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -221,16 +227,30 @@ export default function PlaygroundPage() {
               const rawId = typeof m === "string" ? m : m?.id || m?.model || "";
               if (!rawId || !isChatModel(typeof m === "string" ? { id: rawId } : m)) continue;
               const name = typeof m === "string" ? rawId : m?.name || m?.displayName || rawId;
-              // Always prefix with the provider alias (same as the Models page
-              // `fullModel`). Upstream IDs may contain slashes (e.g. NVIDIA's
-              // "poolside/laguna-xs-2.1"); sending them bare would route to a
-              // nonexistent "poolside" provider instead of "nvidia".
-              addModel(group, rawId, name, rawId.startsWith(`${alias}/`) ? rawId : `${alias}/${rawId}`);
+              // Always prefix with the provider alias — exactly like the Models
+              // page `fullModel`. Upstream ids may themselves contain a slash
+              // (e.g. NVIDIA first-party ids like "nvidia/ising-..."), and the
+              // router + test records both use the doubled form
+              // ("nvidia/nvidia/ising-..."). Sending them bare would route to a
+              // nonexistent provider or 404 upstream.
+              // Exception: resolvers that already return dashboard-routed full
+              // ids (currently only qoder) are kept as-is.
+              const alreadyRouted = LIVE_IDS_ALREADY_ROUTED.has(pid) && rawId.startsWith(`${alias}/`);
+              addModel(group, rawId, name, alreadyRouted ? rawId : `${alias}/${rawId}`);
             }
           } catch {
             // Live discovery is best-effort; static models still work.
           }
         }));
+
+        // Canonical eligible-working-models list (shared definition with the
+        // Models Working filter). Used for working-only mode so header count
+        // and dropdown always match. Falls back to client-side filtering.
+        let working = null;
+        try {
+          const wRes = await fetch("/api/models/working", { cache: "no-store" });
+          if (wRes?.ok) working = (await wRes.json().catch(() => ({}))).models || null;
+        } catch { /* fallback below */ }
 
         const normalized = Array.from(groups.values())
           .map((g) => {
@@ -254,6 +274,7 @@ export default function PlaygroundPage() {
 
         if (cancelled) return;
         setProviders(normalized);
+        if (!cancelled && Array.isArray(working)) setWorkingList(working);
         if (normalized.length === 0) {
           setLoadError("No providers with chat models found. Connect a provider first.");
         } else {
@@ -287,10 +308,27 @@ export default function PlaygroundPage() {
     [eligibleProviders, providerId]
   );
 
-  // Model options for the current scope. In working-only mode the scope may
-  // span all providers; each option carries its provider so selection
-  // auto-resolves unambiguously (duplicates appear once per provider).
+  // Model options for the current scope. In working-only mode the options
+  // come from the canonical GET /api/models/working list (same definition
+  // as the Models Working filter), so header count and dropdown always
+  // match. Each option carries its provider so selection auto-resolves
+  // unambiguously (duplicates appear once per provider).
   const modelOptions = useMemo(() => {
+    if (workingOnly && Array.isArray(workingList)) {
+      const scope = providerId === ALL_PROVIDERS
+        ? workingList
+        : workingList.filter((w) => w.provider === providerId);
+      return scope.map((w) => ({
+        value: w.fullModel,
+        label: providerId === ALL_PROVIDERS
+          ? `${w.name} (${AI_PROVIDERS[w.provider]?.name || w.provider})`
+          : w.name,
+        sub: w.fullModel,
+        request: w.fullModel,
+        providerId: w.provider,
+        providerName: AI_PROVIDERS[w.provider]?.name || w.provider,
+      })).sort((a, b) => a.label.localeCompare(b.label));
+    }
     const scope = workingOnly
       ? (providerId === ALL_PROVIDERS ? eligibleProviders : eligibleProviders.filter((p) => p.id === providerId))
       : (activeProvider ? [activeProvider] : []);
@@ -309,12 +347,26 @@ export default function PlaygroundPage() {
       }
     }
     return out.sort((a, b) => a.label.localeCompare(b.label));
-  }, [workingOnly, providerId, eligibleProviders, activeProvider]);
+  }, [workingOnly, providerId, eligibleProviders, activeProvider, workingList]);
 
   const activeModel = useMemo(
     () => modelOptions.find((o) => o.value === modelId) || null,
     [modelOptions, modelId]
   );
+
+  // In working-only mode the provider dropdown lists only providers that
+  // actually have working models.
+  const workingProviderIds = useMemo(() => {
+    if (Array.isArray(workingList)) return [...new Set(workingList.map((w) => w.provider))];
+    const set = new Set();
+    for (const p of eligibleProviders) {
+      if (p.models.some((m) => m.test === "ok")) set.add(p.id);
+    }
+    return [...set];
+  }, [workingList, eligibleProviders]);
+  const providerOptions = workingOnly
+    ? eligibleProviders.filter((p) => workingProviderIds.includes(p.id))
+    : eligibleProviders;
 
   // The exact model string sent to /api/v1/chat/completions, always in
   // "<provider-alias>/<upstream-id>" form so the backend routes to the
@@ -342,6 +394,11 @@ export default function PlaygroundPage() {
   useEffect(() => () => abortRef.current?.abort(), []);
 
   const pickFirstModel = (pid, list) => {
+    if (workingOnly && Array.isArray(workingList)) {
+      const scope = pid === ALL_PROVIDERS ? workingList : workingList.filter((w) => w.provider === pid);
+      const first = scope[0];
+      return first ? { providerId: first.provider, modelId: first.fullModel } : { providerId: pid, modelId: "" };
+    }
     const scope = pid === ALL_PROVIDERS ? list : list.filter((p) => p.id === pid);
     for (const p of scope) {
       const m = p.models.find((m) => !workingOnly || m.test === "ok");
@@ -509,7 +566,7 @@ export default function PlaygroundPage() {
                 onPick={handleProviderChange}
                 options={[
                   ...(workingOnly ? [{ value: ALL_PROVIDERS, label: "All providers", sub: `${modelOptions.length} working models` }] : []),
-                  ...eligibleProviders.map((p) => ({
+                  ...providerOptions.map((p) => ({
                     value: p.id,
                     label: `${p.name}${p.noAuth ? " (no key needed)" : ""}`,
                     sub: `${p.models.length} models`,

@@ -96,7 +96,7 @@ async function start() {
     if (!res.headersSent) res.status(500).json({ error: "Internal server error" });
   });
 
-  app.listen(PORT, () => {
+  app.listen(PORT, "0.0.0.0", () => {
     console.log(`\n🚀 9Router V3 Backend running on http://localhost:${PORT}`);
     console.log(`   Frontend origin: ${FRONTEND_ORIGIN}`);
     console.log(`   Environment: ${process.env.NODE_ENV || "development"}\n`);

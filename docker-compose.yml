@@ -1,0 +1,49 @@
+name: 9router-v3
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: 9router-v3:latest
+    ports:
+      - "${HOST_PORT:-3001}:3001"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: "production"
+      PORT: "3001"
+      DATA_DIR: "/data"
+    volumes:
+      - 9router-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  # Optional external PostgreSQL. Enable with:
+  #   docker compose --profile postgres up -d
+  # Then set DATABASE_URL=postgresql://nine:nine@postgres:5432/9router
+  # in .env and recreate the app service.
+  postgres:
+    profiles: ["postgres"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: "nine"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-change-me-in-env}"
+      POSTGRES_DB: "9router"
+    volumes:
+      - 9router-pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nine -d 9router"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  9router-data:
+  9router-pgdata:
