@@ -34,3 +34,9 @@ backend/canva_debug/
 backend/src/automation/profiles/
 backend/data/
 har/
+
+data/db/*.sqlite
+data/db/*.sqlite-shm
+data/db/*.sqlite-wal
+data/auth/cli-secret
+data/machine-id

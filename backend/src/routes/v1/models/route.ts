@@ -189,7 +189,15 @@ export async function buildModelsList(kindFilter) {
   } catch (e) {
     console.log("Could not fetch disabled models");
   }
+  let blockedByAlias = {};
+  try {
+    const { loadBlocks } = await import("../../../lib/models/eligibility.js");
+    blockedByAlias = await loadBlocks();
+  } catch (e) {
+    console.log("Could not fetch blocked models");
+  }
   const isDisabled = (alias, modelId) => Array.isArray(disabledByAlias[alias]) && disabledByAlias[alias].includes(modelId);
+  const isBlocked = (alias, modelId) => Array.isArray(blockedByAlias[alias]) && blockedByAlias[alias].includes(modelId);
 
   const activeConnectionByProvider = new Map();
   for (const conn of connections) {
@@ -224,7 +232,7 @@ export async function buildModelsList(kindFilter) {
       if (!providerMatchesKinds(providerId, kindFilter)) continue;
       for (const model of providerModels) {
         if (!kindFilter.includes(modelKind(model))) continue;
-        if (isDisabled(alias, model.id)) continue;
+        if (isDisabled(alias, model.id) || isBlocked(alias, model.id)) continue;
         models.push({
           id: `${alias}/${model.id}`,
           object: "model",
@@ -354,6 +362,7 @@ export async function buildModelsList(kindFilter) {
         const kind = staticModelKindById.get(modelId) || inferKindFromUnknownModelId(modelId);
         if (!kindFilter.includes(kind)) continue;
         if (isDisabled(outputAlias, modelId) || isDisabled(staticAlias, modelId)) continue;
+        if (isBlocked(outputAlias, modelId) || isBlocked(staticAlias, modelId)) continue;
 
         models.push({
           id: `${outputAlias}/${modelId}`,

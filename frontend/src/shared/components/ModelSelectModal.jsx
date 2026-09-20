@@ -44,6 +44,7 @@ export default function ModelSelectModal({
   const [providerNodes, setProviderNodes] = useState([]);
   const [customModels, setCustomModels] = useState([]);
   const [disabledModels, setDisabledModels] = useState({});
+  const [blockedModels, setBlockedModels] = useState({});
 
   const fetchCombos = async () => {
     try {
@@ -107,6 +108,22 @@ export default function ModelSelectModal({
 
   useEffect(() => {
     if (isOpen) fetchDisabledModels();
+  }, [isOpen]);
+
+  const fetchBlockedModels = async () => {
+    try {
+      const res = await fetch("/api/models/blocks");
+      if (!res.ok) throw new Error(`Failed to fetch blocked models: ${res.status}`);
+      const data = await res.json();
+      setBlockedModels(data.blocked || {});
+    } catch (error) {
+      console.error("Error fetching blocked models:", error);
+      setBlockedModels({});
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) fetchBlockedModels();
   }, [isOpen]);
 
   const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...APIKEY_PROVIDERS }), []);
@@ -294,20 +311,23 @@ export default function ModelSelectModal({
       }
     });
 
-    // Filter out disabled models per provider (disabled keyed by storage alias OR providerId)
+    // Filter out hidden (disabled endpoint) AND hard-blocked models per
+    // provider (both keyed by storage alias OR providerId)
     Object.entries(groups).forEach(([providerId, group]) => {
       const aliasKey = getProviderAlias(providerId);
-      const disabledIds = new Set([
+      const excludedIds = new Set([
         ...(disabledModels[aliasKey] || []),
         ...(disabledModels[providerId] || []),
+        ...(blockedModels[aliasKey] || []),
+        ...(blockedModels[providerId] || []),
       ]);
-      if (disabledIds.size === 0) return;
-      group.models = group.models.filter((m) => !disabledIds.has(m.id));
+      if (excludedIds.size === 0) return;
+      group.models = group.models.filter((m) => !excludedIds.has(m.id));
       if (group.models.length === 0) delete groups[providerId];
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, blockedModels, kindFilter, activeProviders]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {

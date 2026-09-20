@@ -19,6 +19,8 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { isModelBlocked, partitionComboModels, loadBlocks } from "../../lib/models/eligibility.js";
+import { PROVIDER_ID_TO_ALIAS } from "open-sse/config/providerModels.js";
 
 /**
  * Handle chat completion request
@@ -92,16 +94,30 @@ export async function handleChat(request, clientRawRequest = null) {
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);
   if (comboModels) {
+    // Exclude hard-disabled (blocked) models from combo execution.
+    // Never silently substitute them — if none remain, fail clearly.
+    let eligibleModels = comboModels;
+    try {
+      const blocks = await loadBlocks();
+      const { eligible, blocked } = partitionComboModels(comboModels, blocks);
+      if (blocked.length > 0) {
+        log.warn("COMBO", `"${modelStr}" skipping disabled models: ${blocked.join(", ")}`);
+      }
+      if (eligible.length === 0) {
+        return errorResponse(HTTP_STATUS.FORBIDDEN, `Combo "${modelStr}" is unavailable: all ${comboModels.length} model(s) are disabled. Re-enable a model on the Models page.`);
+      }
+      eligibleModels = eligible;
+    } catch { /* on lookup failure, fall back to full list */ }
     // Check for combo-specific strategy first, fallback to global
     const comboStrategies = settings.comboStrategies || {};
     const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
-    
+
     const comboStickyLimit = settings.comboStickyRoundRobinLimit;
-    log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
+    log.info("CHAT", `Combo "${modelStr}" with ${eligibleModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
     return handleComboChat({
       body,
-      models: comboModels,
+      models: eligibleModels,
       handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
       log,
       comboName: modelStr,
@@ -124,6 +140,20 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   if (!modelInfo.provider) {
     const comboModels = await getComboModels(modelStr);
     if (comboModels) {
+      // Exclude hard-disabled (blocked) models from combo execution.
+      // Never silently substitute them — if none remain, fail clearly.
+      let eligibleModels = comboModels;
+      try {
+        const blocks = await loadBlocks();
+        const { eligible, blocked } = partitionComboModels(comboModels, blocks);
+        if (blocked.length > 0) {
+          log.warn("COMBO", `"${modelStr}" skipping disabled models: ${blocked.join(", ")}`);
+        }
+        if (eligible.length === 0) {
+          return errorResponse(HTTP_STATUS.FORBIDDEN, `Combo "${modelStr}" is unavailable: all ${comboModels.length} model(s) are disabled. Re-enable a model on the Models page.`);
+        }
+        eligibleModels = eligible;
+      } catch { /* on lookup failure, fall back to full list */ }
       const chatSettings = await getSettings();
       // Check for combo-specific strategy first, fallback to global
       const comboStrategies = chatSettings.comboStrategies || {};
@@ -131,10 +161,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
       
       const comboStickyLimit = chatSettings.comboStickyRoundRobinLimit;
-      log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
+      log.info("CHAT", `Combo "${modelStr}" with ${eligibleModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
       return handleComboChat({
         body,
-        models: comboModels,
+        models: eligibleModels,
         handleSingleModel: (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
         log,
         comboName: modelStr,
@@ -148,12 +178,22 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
   const { provider, model } = modelInfo;
 
-  // Log model routing (alias → actual model)
-  if (modelStr !== `${provider}/${model}`) {
-    log.info("ROUTING", `${modelStr} → ${provider}/${model}`);
-  } else {
-    log.info("ROUTING", `Provider: ${provider}, Model: ${model}`);
-  }
+  // Debug trace: requested vs resolved routing (no secrets — ids only).
+  // Proves which provider/model actually serve the request and whether any
+  // fallback to another connection happened.
+  log.info("ROUTING", `requested=${modelStr} resolved=${provider}/${model}`);
+
+  // Hard-disabled (blocked) models are rejected here — single choke point for
+  // direct API calls, Playground, Model Test, and per-model combo execution.
+  // Never fall through to another model as a silent replacement.
+  try {
+    const blocks = await loadBlocks();
+    const alias = PROVIDER_ID_TO_ALIAS[provider] || provider;
+    if (isModelBlocked(provider, model, alias, blocks)) {
+      log.warn("BLOCKED", `Rejected request for disabled model: ${provider}/${model}`);
+      return errorResponse(HTTP_STATUS.FORBIDDEN, `Model ${alias}/${model} is disabled and cannot receive requests. Re-enable it on the Models page.`);
+    }
+  } catch { /* on lookup failure, allow the request through */ }
 
   // Extract userAgent from request
   const userAgent = request?.headers?.get("user-agent") || "";
@@ -234,7 +274,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
 
     if (shouldFallback) {
-      log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);
+      log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback (same provider ${provider}, same model ${model})`);
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;
       lastStatus = result.status;

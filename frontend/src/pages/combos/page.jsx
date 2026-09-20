@@ -7,6 +7,7 @@ import { restrictToVerticalAxis, restrictToParentElement } from "@dnd-kit/modifi
 import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, Toggle, ConfirmModal } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
+import { splitFullModel, isModelBlocked } from "@/shared/utils/modelEligibility";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
@@ -18,8 +19,14 @@ export default function CombosPage() {
   const [editingCombo, setEditingCombo] = useState(null);
   const [activeProviders, setActiveProviders] = useState([]);
   const [comboStrategies, setComboStrategies] = useState({});
+  const [blocksMap, setBlocksMap] = useState({});
   const [confirmState, setConfirmState] = useState(null);
   const { copied, copy } = useCopyToClipboard();
+
+  const blockedInCombo = (models) => (models || []).filter((m) => {
+    const { alias, id } = splitFullModel(m);
+    return isModelBlocked(alias, alias, id, blocksMap);
+  });
 
   useEffect(() => {
     fetchData();
@@ -27,10 +34,11 @@ export default function CombosPage() {
 
   const fetchData = async () => {
     try {
-      const [combosRes, providersRes, settingsRes] = await Promise.all([
+      const [combosRes, providersRes, settingsRes, blocksRes] = await Promise.all([
         fetch("/api/combos"),
         fetch("/api/providers"),
         fetch("/api/settings"),
+        fetch("/api/models/blocks", { cache: "no-store" }).catch(() => null),
       ]);
       const combosData = await combosRes.json();
       const providersData = await providersRes.json();
@@ -38,6 +46,7 @@ export default function CombosPage() {
       
       // Only LLM combos here — webSearch/webFetch combos belong to media-providers/web
       if (combosRes.ok) setCombos((combosData.combos || []).filter(c => !c.kind));
+      if (blocksRes?.ok) setBlocksMap((await blocksRes.json().catch(() => ({}))).blocked || {});
       if (providersRes.ok) {
         setActiveProviders(providersData.connections || []);
       }
@@ -174,6 +183,7 @@ export default function CombosPage() {
               onCopy={copy}
               onEdit={() => setEditingCombo(combo)}
               onDelete={() => handleDelete(combo.id)}
+              blockedModels={blockedInCombo(combo.models)}
               roundRobinEnabled={comboStrategies[combo.name]?.fallbackStrategy === "round-robin"}
               onToggleRoundRobin={(enabled) => handleToggleRoundRobin(combo.name, enabled)}
             />
@@ -213,7 +223,8 @@ export default function CombosPage() {
   );
 }
 
-function ComboCard({ combo, copied, onCopy, onEdit, onDelete, roundRobinEnabled, onToggleRoundRobin }) {
+function ComboCard({ combo, copied, onCopy, onEdit, onDelete, blockedModels = [], roundRobinEnabled, onToggleRoundRobin }) {
+  const allBlocked = combo.models.length > 0 && blockedModels.length >= combo.models.length;
   return (
     <Card padding="sm" className="group">
       <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -222,7 +233,19 @@ function ComboCard({ combo, copied, onCopy, onEdit, onDelete, roundRobinEnabled,
             <span className="material-symbols-outlined text-primary text-[18px]">layers</span>
           </div>
           <div className="min-w-0 flex-1">
-            <code className="block truncate font-mono text-sm font-medium">{combo.name}</code>
+            <div className="flex flex-wrap items-center gap-2">
+              <code className="block truncate font-mono text-sm font-medium">{combo.name}</code>
+              {blockedModels.length > 0 ? (
+                <span
+                  title={allBlocked
+                    ? "All models in this combo are disabled — requests will fail until one is re-enabled."
+                    : `Disabled, skipped at runtime: ${blockedModels.join(", ")}`}
+                  className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${allBlocked ? "text-red-500 bg-red-500/10" : "text-amber-500 bg-amber-500/10"}`}
+                >
+                  {allBlocked ? "UNAVAILABLE — all models disabled" : `${blockedModels.length} disabled model${blockedModels.length === 1 ? "" : "s"} skipped`}
+                </span>
+              ) : null}
+            </div>
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
               {combo.models.length === 0 ? (
                 <span className="text-xs text-text-muted italic">No models</span>

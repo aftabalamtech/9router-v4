@@ -56,6 +56,11 @@ export {
   getDisabledModels, getDisabledByProvider, disableModels, enableModels,
 } from "./repos/disabledModelsRepo.js";
 
+// Blocked models (hard-disable: hidden from lists AND rejected at request time)
+export {
+  getBlockedModels, getBlockedByProvider, blockModels, unblockModels,
+} from "./repos/modelBlocksRepo.js";
+
 // Usage
 export {
   statsEmitter, trackPendingRequest, getActiveRequests,

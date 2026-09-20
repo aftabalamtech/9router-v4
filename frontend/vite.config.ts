@@ -16,6 +16,7 @@ export default defineConfig({
   server: {
     port: 5177,
     strictPort: true,
+    allowedHosts: true,
     proxy: {
       // All /api/* → backend
       "/api": {

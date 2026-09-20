@@ -235,12 +235,19 @@ export const PROVIDER_MODELS = {
     { id: "minimax-m2.7", name: "MiniMax M2.7", targetFormat: "claude" },
     { id: "minimax-m2.5", name: "MiniMax M2.5", targetFormat: "claude" },
   ],
-  oc: [  // OpenCode
-    // { id: "nemotron-3-super-free", name: "Nemotron 3 Super" },
-    // { id: "qwen3.6-plus-free", name: "Qwen 3.6 Plus" },
-    // { id: "big-pickle", name: "Big Pickle", targetFormat: "claude" },
-    // { id: "minimax-m2.5-free", name: "MiniMax M2.5", targetFormat: "claude" },
-    // { id: "trinity-large-preview-free", name: "Trinity Large Preview" },
+  oc: [  // OpenCode Zen free tier — https://opencode.ai/docs/zen (verified 2026-09-20
+        // against live https://opencode.ai/zen/v1/models). Anonymous use is
+        // currently rejected upstream (FreeTierError); add a free API key from
+        // https://opencode.ai/auth as a connection to use these ($0) models.
+    { id: "big-pickle", name: "Big Pickle (free)" },
+    { id: "mimo-v2.5-free", name: "MiMo V2.5 (free)" },
+    { id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin (free)" },
+    { id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra (free)" },
+    { id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning (free)" },
+    { id: "muse-spark-1.3-contributor-free", name: "Muse Spark 1.3 Contributor (free)" },
+    { id: "muse-spark-1.2-contributor-free", name: "Muse Spark 1.2 Contributor (free)" },
+    // Excluded: jev-1.13-free (SystemOne-only endpoint, not chat-compatible),
+    // deepseek-v4-flash-free (upstream reports "Model is unavailable").
   ],
 
   cl: [  // Cline

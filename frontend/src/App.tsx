@@ -8,6 +8,7 @@ const Login           = lazy(() => import("./pages/login/page"));
 const Callback        = lazy(() => import("./pages/callback/page"));
 const Dashboard       = lazy(() => import("./pages/page"));
 const Providers       = lazy(() => import("./pages/providers/page"));
+const Playground      = lazy(() => import("./pages/playground/page"));
 const Models          = lazy(() => import("./pages/models/page"));
 const ProviderDetail  = lazy(() => import("./pages/providers/[id]/page"));
 const ProvidersNew    = lazy(() => import("./pages/providers/new/page"));
@@ -64,6 +65,7 @@ export default function App() {
           <Route path="/dashboard" element={<RequireAuth><DashboardLayout /></RequireAuth>}>
             <Route index element={<Dashboard />} />
             <Route path="providers"       element={<Providers />} />
+            <Route path="playground"      element={<Playground />} />
             <Route path="models"          element={<Models />} />
             <Route path="providers/new"   element={<ProvidersNew />} />
             <Route path="providers/weavy/pool" element={<WeavyPool />} />

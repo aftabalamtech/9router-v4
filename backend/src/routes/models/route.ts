@@ -1,6 +1,7 @@
 
 import { getModelAliases, setModelAlias } from "../../models/index.js";
 import { getDisabledModels } from "../../lib/disabledModelsDb.js";
+import { loadBlocks } from "../../lib/models/eligibility.js";
 import { AI_MODELS } from "../../shared/constants/config.js";
 import { getProviderAlias } from "../../shared/constants/providers.js";
 
@@ -9,12 +10,15 @@ export async function GET(req, res) {
   try {
     const modelAliases = await getModelAliases();
     const disabled = await getDisabledModels();
+    const blocked = await loadBlocks().catch(() => ({}));
 
     const models = AI_MODELS
       .filter((m) => {
         const alias = getProviderAlias(m.provider) || m.provider;
         const list = disabled[alias] || disabled[m.provider] || [];
-        return !list.includes(m.model);
+        if (list.includes(m.model)) return false;
+        const blockedList = blocked[alias] || blocked[m.provider] || [];
+        return !blockedList.includes(m.model);
       })
       .map((m) => {
         const fullModel = `${m.provider}/${m.model}`;
