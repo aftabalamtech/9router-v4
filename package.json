@@ -9,7 +9,7 @@
     "backend/open-sse"
   ],
   "scripts": {
-    "dev": "concurrently \"npm run dev --workspace=9router-backend\" \"npm run dev --workspace=9router-frontend\"",
+    "dev": "concurrently \"npm run dev --workspace=9router-backend\" \"npm run dev --workspace=9router-frontend\" \"node backend/bin/opencode-bridge.mjs\"",
     "build": "npm run build --workspace=9router-backend && npm run build --workspace=9router-frontend",
     "backend": "npm run dev --workspace=9router-backend",
     "frontend": "npm run dev --workspace=9router-frontend",

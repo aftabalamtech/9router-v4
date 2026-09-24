@@ -7,7 +7,15 @@ import { initState } from "../translator/index.js";
 import { parseSSELine, formatSSE } from "../utils/streamHelpers.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 
-const ZEN_BASE = "https://opencode.ai/zen/v1";
+const DEFAULT_ZEN_BASE = "https://opencode.ai/zen/v1";
+
+// OPENCODE_ZEN_BASE routes OpenCode Free traffic somewhere other than the public
+// Zen endpoint — used to point at backend/bin/opencode-bridge.mjs, a local
+// OpenAI-compatible facade over the LOCAL OpenCode client. Needed because Zen
+// rejects anonymous calls server-side (see ANON_TOKEN note below) while the
+// official client still serves the $0 models.
+const ZEN_BASE = (process.env.OPENCODE_ZEN_BASE || DEFAULT_ZEN_BASE).replace(/\/+$/, "");
+const BRIDGE_MODE = Boolean(process.env.OPENCODE_ZEN_BASE);
 
 // Placeholder token used for anonymous requests (virtual "Public" connection).
 // NOTE (2026-09-20): OpenCode now rejects anonymous free-tier use server-side
@@ -18,6 +26,7 @@ const ANON_TOKEN = "public";
 // Models served by /zen/v1/responses (OpenAI Responses API), NOT /chat/completions.
 // Verified 2026-09-20: /chat/completions returns "Internal server error" for these
 // while /responses routes them to the provider (FreeTierError when anonymous).
+// The local bridge speaks chat/completions only, so bridge mode skips this split.
 const RESPONSES_MODELS = new Set([
   "muse-spark-1.3-contributor-free",
   "muse-spark-1.2-contributor-free",
@@ -83,6 +92,7 @@ export class OpenCodeExecutor extends BaseExecutor {
   }
 
   isResponsesModel(model) {
+    if (BRIDGE_MODE) return false; // local bridge only implements /chat/completions
     return RESPONSES_MODELS.has(stripAlias(model));
   }
 
@@ -105,8 +115,11 @@ export class OpenCodeExecutor extends BaseExecutor {
 
   buildUrl(model) {
     const id = stripAlias(model);
-    if (RESPONSES_MODELS.has(id)) return `${ZEN_BASE}/responses`;
-    if (MESSAGES_MODELS.has(id)) return `${ZEN_BASE}/messages`;
+    // Bridge mode: the local bridge only speaks /chat/completions for every model.
+    if (!BRIDGE_MODE) {
+      if (RESPONSES_MODELS.has(id)) return `${ZEN_BASE}/responses`;
+      if (MESSAGES_MODELS.has(id)) return `${ZEN_BASE}/messages`;
+    }
     return `${ZEN_BASE}/chat/completions`;
   }
 
