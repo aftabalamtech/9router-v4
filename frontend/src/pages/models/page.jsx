@@ -1,9 +1,10 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { AI_PROVIDERS, getProviderAlias, getProviderByAlias } from "@/shared/constants/providers";
 import { getModelsByProviderId } from "@/shared/constants/models";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { ConfirmModal, Modal } from "@/shared/components";
 import { isModelBlocked, isModelHidden, matchesStatusFilter } from "@/shared/utils/modelEligibility";
+import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
 import ModelBatchTest from "../providers/components/ModelBatchTest";
 
 function kindOf(m) {
@@ -76,18 +77,24 @@ export default function ModelsPage() {
   const { copied, copy } = useCopyToClipboard();
   const [connections, setConnections] = useState([]);
   const [customModels, setCustomModels] = useState([]);
+  const [syncedModels, setSyncedModels] = useState([]);
   const [modelAliases, setModelAliases] = useState({});
   const [disabledMap, setDisabledMap] = useState({});
   const [blocksMap, setBlocksMap] = useState({});
   const [testResults, setTestResults] = useState({});
   const [testingIds, setTestingIds] = useState([]);
-  const [singleTesting, setSingleTesting] = useState(null);
+  const [singleTestingIds, setSingleTestingIds] = useState([]);
+  const inflightSingleRef = useRef(null);
+  if (inflightSingleRef.current === null) inflightSingleRef.current = new Set();
   const [compatEntry, setCompatEntry] = useState(null);
   const [confirmDisable, setConfirmDisable] = useState(null);
   const [notice, setNotice] = useState(null); // { type: "success" | "error", text }
 
   const [providerFilter, setProviderFilter] = useState("connected");
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 100;
   const [visibility, setVisibility] = useState("all"); // all | visible | hidden
   const [statusFilter, setStatusFilter] = useState("all"); // all | working | error | hidden | disabled
   const [price, setPrice] = useState("all"); // all | free | paid
@@ -106,23 +113,28 @@ export default function ModelsPage() {
 
   const providerIds = useMemo(() => Object.keys(AI_PROVIDERS || {}), []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async ({ force = false } = {}) => {
+    // cachedJson dedupes in-flight requests and reuses recent reads, so
+    // remounting this page (every tab switch) does not refire all six GETs.
+    const read = (url) => cachedJson(url, { force });
     try {
-      const [connRes, customRes, disRes, blockRes, resRes, aliasRes] = await Promise.all([
-        fetch("/api/providers", { cache: "no-store" }),
-        fetch("/api/models/custom", { cache: "no-store" }),
-        fetch("/api/models/disabled", { cache: "no-store" }),
-        fetch("/api/models/blocks", { cache: "no-store" }),
-        fetch("/api/models/test-results", { cache: "no-store" }),
-        fetch("/api/models/alias", { cache: "no-store" }),
+      const [connRes, customRes, disRes, blockRes, resRes, aliasRes, syncRes] = await Promise.all([
+        read("/api/providers"),
+        read("/api/models/custom"),
+        read("/api/models/disabled"),
+        read("/api/models/blocks"),
+        read("/api/models/test-results"),
+        read("/api/models/alias"),
+        read("/api/models/synced"),
       ]);
-      if (connRes.ok) setConnections((await connRes.json().catch(() => ({}))).connections || []);
-      if (customRes.ok) setCustomModels((await customRes.json().catch(() => ({}))).models || []);
-      if (aliasRes.ok) setModelAliases((await aliasRes.json().catch(() => ({}))).aliases || {});
-      if (disRes.ok) setDisabledMap((await disRes.json().catch(() => ({}))).disabled || {});
-      if (blockRes.ok) setBlocksMap((await blockRes.json().catch(() => ({}))).blocked || {});
+      if (connRes.ok) setConnections(connRes.data.connections || []);
+      if (customRes.ok) setCustomModels(customRes.data.models || []);
+      if (syncRes.ok) setSyncedModels(syncRes.data.models || []);
+      if (aliasRes.ok) setModelAliases(aliasRes.data.aliases || {});
+      if (disRes.ok) setDisabledMap(disRes.data.disabled || {});
+      if (blockRes.ok) setBlocksMap(blockRes.data.blocked || {});
       if (resRes.ok) {
-        const all = (await resRes.json().catch(() => ({}))).results || {};
+        const all = resRes.data.results || {};
         const mapped = {};
         for (const [fullModel, r] of Object.entries(all)) {
           if (r?.status === "passed") mapped[fullModel] = "ok";
@@ -135,10 +147,29 @@ export default function ModelsPage() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Debounce the search box so filtering a huge catalog doesn't re-run per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => { setDebouncedSearch(search); setPage(1); }, 300);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Reset to first page whenever the result set criteria change.
+  useEffect(() => { setPage(1); }, [providerFilter, visibility, statusFilter, price, freeFirst]);
+
+  // Providers that need no credentials (opencode, local-device, the local TTS
+  // engines, searxng...). They are usable with zero connections, so they must
+  // count as "connected" — otherwise the default Connected filter hides every
+  // one of their models and the page renders "0/0 active".
+  const noAuthProviderIds = useMemo(
+    () => new Set(Object.entries(AI_PROVIDERS).filter(([, p]) => p.noAuth).map(([id]) => id)),
+    []
+  );
+
   const connectedProviders = useMemo(() => {
     const set = new Set(connections.filter((c) => c.isActive !== false).map((c) => c.provider));
+    for (const id of noAuthProviderIds) set.add(id);
     return set;
-  }, [connections]);
+  }, [connections, noAuthProviderIds]);
 
   const allEntries = useMemo(() => {
     const out = [];
@@ -167,6 +198,51 @@ export default function ModelsPage() {
       }
     }
     const hiddenByAlias = (a) => new Set(disabledMap[a] || []);
+
+    // Static (built-in) model ids per storage alias, used to dedupe the
+    // synced and alias-derived sources against the built-in catalog.
+    const hardcodedByAlias = {};
+    try {
+      for (const pid of providerIds) {
+        const a = getProviderAlias(pid);
+        hardcodedByAlias[a] = new Set((getModelsByProviderId(pid) || []).map((m) => m.id));
+      }
+    } catch { /* ignore */ }
+    const customKeys = new Set(customModels.map((m) => `${m.providerAlias}/${m.id}`));
+
+    // Provider-sync discovered models. These are registered against their
+    // storage alias and the exact upstream id, deduped against the static list
+    // and against custom models so one model never appears twice.
+    const syncedIds = new Set();
+    for (const m of syncedModels) {
+      const storageAlias = m.storageAlias || m.providerAlias;
+      if (!storageAlias || !m.id) continue;
+      const fullModel = m.fullModel || `${storageAlias}/${m.id}`;
+      const provider = getProviderByAlias(storageAlias);
+      const providerId = provider?.id || storageAlias;
+      if (providerFilter !== "all" && providerFilter !== "connected") {
+        if (storageAlias !== getProviderAlias(providerFilter)) continue;
+      }
+      if (providerFilter === "connected"
+        && ![...connectedProviders].some((id) => getProviderAlias(id) === storageAlias)) continue;
+      if (hardcodedByAlias[storageAlias]?.has(m.id)) continue;
+      if (customKeys.has(`${storageAlias}/${m.id}`)) continue;
+      syncedIds.add(fullModel);
+      out.push({
+        key: fullModel,
+        providerId,
+        providerAlias: storageAlias,
+        id: m.id,
+        fullModel,
+        name: m.name || m.id,
+        kind: kindOf(m),
+        isFree: !!m.isFree,
+        isCustom: true,
+        hidden: hiddenByAlias(storageAlias).has(m.id),
+        hasConnection: provider ? connectedProviders.has(providerId) : true,
+      });
+    }
+
     for (const m of customModels) {
       if (providerFilter !== "all" && providerFilter !== "connected") {
         if (m.providerAlias !== getProviderAlias(providerFilter)) continue;
@@ -188,13 +264,6 @@ export default function ModelsPage() {
     }
     // Alias-added models (provider "Add Model" stores aliases like openrouter/deepseek/...).
     // These are NOT in /api/models/custom, so derive them here per provider.
-    const hardcodedByAlias = {};
-    try {
-      for (const pid of providerIds) {
-        const a = getProviderAlias(pid);
-        hardcodedByAlias[a] = new Set((getModelsByProviderId(pid) || []).map((m) => m.id));
-      }
-    } catch { /* ignore */ }
     const aliasEntries = [];
     for (const [aliasName, fullModel] of Object.entries(modelAliases)) {
       if (typeof fullModel !== "string" || !fullModel.includes("/")) continue;
@@ -203,6 +272,9 @@ export default function ModelsPage() {
       const modelId = fullModel.slice(slash + 1);
       if (!modelId) continue;
       if (hardcodedByAlias[storageAlias]?.has(modelId)) continue;
+      // Also skip anything already covered by the static list or the synced
+      // catalog so the same model never appears twice under one provider.
+      if (syncedIds.has(`${storageAlias}/${modelId}`)) continue;
       const provider = getProviderByAlias(storageAlias);
       const providerId = provider?.id || storageAlias;
       if (providerFilter !== "all" && providerFilter !== "connected") {
@@ -229,10 +301,10 @@ export default function ModelsPage() {
       if (!seenKeys.has(e.key)) { seenKeys.add(e.key); out.push(e); }
     }
     return out;
-  }, [providerIds, providerFilter, connectedProviders, customModels, disabledMap, modelAliases]);
+  }, [providerIds, providerFilter, connectedProviders, customModels, syncedModels, disabledMap, modelAliases]);
 
   const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = debouncedSearch.trim().toLowerCase();
     let list = allEntries.map((e) => {
       const ts = testResults[e.key];
       return {
@@ -256,7 +328,11 @@ export default function ModelsPage() {
     });
     if (freeFirst) list = [...list].sort((a, b) => Number(b.isFree) - Number(a.isFree));
     return list;
-  }, [allEntries, search, visibility, statusFilter, price, freeFirst, blocksMap, testResults]);
+  }, [allEntries, debouncedSearch, visibility, statusFilter, price, freeFirst, blocksMap, testResults]);
+
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount);
+  const paged = useMemo(() => filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE), [filtered, safePage]);
 
   const visibleCount = allEntries.filter((e) => !e.hidden).length;
 
@@ -285,6 +361,7 @@ export default function ModelsPage() {
         if (hide) cur.add(entry.id); else cur.delete(entry.id);
         return { ...prev, [entry.providerAlias]: [...cur] };
       });
+      invalidateCache("/api/models/disabled");
     } catch { /* ignore */ }
   }, []);
 
@@ -301,6 +378,7 @@ export default function ModelsPage() {
         cur.add(entry.id);
         return { ...prev, [entry.providerAlias]: [...cur] };
       });
+      invalidateCache("/api/models/blocks");
       showNotice("success", `Disabled ${entry.fullModel}. It will no longer receive requests.`);
     } catch {
       showNotice("error", `Could not disable ${entry.fullModel}.`);
@@ -336,7 +414,7 @@ export default function ModelsPage() {
         body: JSON.stringify({ providerAlias: alias, ids }),
       }).catch(() => {})
     ));
-    refresh();
+    refresh({ force: true });
   }, [filtered, refresh]);
 
   const handleShowAll = useCallback(async () => {
@@ -344,11 +422,11 @@ export default function ModelsPage() {
     await Promise.all(hidden.map((e) =>
       fetch(`/api/models/disabled?providerAlias=${encodeURIComponent(e.providerAlias)}&id=${encodeURIComponent(e.id)}`, { method: "DELETE" }).catch(() => {})
     ));
-    refresh();
+    refresh({ force: true });
   }, [allEntries, refresh]);
 
   const handleBatchEnd = useCallback(async (snapshot) => {
-    refresh();
+    refresh({ force: true });
     if (!autoHideFailed || !snapshot) return;
     const failed = (snapshot.results || []).filter((r) => r.status === "failed" || r.status === "timeout");
     if (failed.length === 0) return;
@@ -367,12 +445,14 @@ export default function ModelsPage() {
         body: JSON.stringify({ providerAlias: alias, ids }),
       }).catch(() => {})
     ));
-    refresh();
+    refresh({ force: true });
   }, [autoHideFailed, refresh]);
 
   const handleSingleTest = useCallback(async (entry) => {
-    if (singleTesting || entry.disabled) return;
-    setSingleTesting(entry.key);
+    if (entry.disabled) return;
+    if (inflightSingleRef.current.has(entry.key)) return; // prevent duplicate tests
+    inflightSingleRef.current.add(entry.key);
+    setSingleTestingIds((prev) => (prev.includes(entry.key) ? prev : [...prev, entry.key]));
     try {
       const res = await fetch("/api/models/test", {
         method: "POST",
@@ -381,13 +461,13 @@ export default function ModelsPage() {
       });
       const data = await res.json().catch(() => ({}));
       setTestResults((prev) => ({ ...prev, [entry.key]: data.ok ? "ok" : "error" }));
-      refresh();
     } catch {
       setTestResults((prev) => ({ ...prev, [entry.key]: "error" }));
     } finally {
-      setSingleTesting(null);
+      inflightSingleRef.current.delete(entry.key);
+      setSingleTestingIds((prev) => prev.filter((k) => k !== entry.key));
     }
-  }, [singleTesting, refresh]);
+  }, []);
 
   const batchModels = useMemo(() => filtered
     .filter((e) => !e.hidden && !e.disabled && e.hasConnection)
@@ -395,13 +475,30 @@ export default function ModelsPage() {
     [filtered]);
 
   const providerOptions = useMemo(() => {
+    // Count what the user would actually see for each provider: static models
+    // plus the synced catalog and custom/alias models registered under its
+    // alias. Counting only the static table hid OpenCode entirely.
+    const extraByAlias = new Map();
+    const bump = (alias, n = 1) => {
+      if (!alias) return;
+      extraByAlias.set(alias, (extraByAlias.get(alias) || 0) + n);
+    };
+    for (const m of syncedModels) bump(m.storageAlias || m.providerAlias);
+    for (const m of customModels) bump(m.providerAlias);
+    for (const fullModel of Object.values(modelAliases)) {
+      if (typeof fullModel === "string" && fullModel.includes("/")) {
+        bump(fullModel.slice(0, fullModel.indexOf("/")));
+      }
+    }
+
     const withCounts = providerIds.map((id) => {
+      const alias = getProviderAlias(id);
       let n = 0;
       try { n = (getModelsByProviderId(id) || []).length; } catch { n = 0; }
-      return { id, alias: getProviderAlias(id), count: n, connected: connectedProviders.has(id) };
+      return { id, alias, count: n + (extraByAlias.get(alias) || 0), connected: connectedProviders.has(id) };
     }).filter((p) => p.count > 0);
     return withCounts;
-  }, [providerIds, connectedProviders]);
+  }, [providerIds, connectedProviders, syncedModels, customModels, modelAliases]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -475,9 +572,9 @@ export default function ModelsPage() {
       />
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
-        {filtered.map((entry) => {
+        {paged.map((entry) => {
           const status = entry.testStatus;
-          const testing = testingIds.includes(entry.key) || singleTesting === entry.key;
+          const testing = testingIds.includes(entry.key) || singleTestingIds.includes(entry.key);
           return (
             <div key={entry.key} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border bg-card ${entry.disabled ? "border-amber-500/40 opacity-80" : status === "ok" ? "border-green-500/40" : status === "error" ? "border-red-500/40" : "border-border"}`}>
               <span className="material-symbols-outlined text-lg shrink-0" style={status === "ok" ? { color: "#22c55e" } : status === "error" ? { color: "#ef4444" } : undefined}>smart_toy</span>
@@ -519,6 +616,13 @@ export default function ModelsPage() {
         })}
       </div>
       {filtered.length === 0 && <p className="text-xs text-text-muted">No models match the current filters.</p>}
+      {pageCount > 1 && (
+        <div className="flex items-center justify-center gap-2 text-xs text-text-muted">
+          <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={safePage <= 1} className="px-2.5 py-1.5 rounded-lg border border-border disabled:opacity-40 hover:text-primary">Prev</button>
+          <span>Page {safePage} of {pageCount} ({filtered.length} models)</span>
+          <button onClick={() => setPage((p) => Math.min(pageCount, p + 1))} disabled={safePage >= pageCount} className="px-2.5 py-1.5 rounded-lg border border-border disabled:opacity-40 hover:text-primary">Next</button>
+        </div>
+      )}
 
       {compatEntry && <CompatibilityModal entry={compatEntry} onClose={() => setCompatEntry(null)} />}
       {confirmDisable && (

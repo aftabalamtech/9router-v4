@@ -23,6 +23,7 @@ import {
 import { Link } from 'react-router-dom';
 import { getErrorCode, getRelativeTime } from "@/shared/utils";
 import { useNotificationStore } from "@/store/notificationStore";
+import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import ModelAvailabilityBadge from "./components/ModelAvailabilityBadge";
 
@@ -158,24 +159,28 @@ export default function ProvidersPage() {
     });
 
   useEffect(() => {
+    let cancelled = false;
     const fetchData = async () => {
       try {
         const [connectionsRes, nodesRes] = await Promise.all([
-          fetch("/api/providers"),
-          fetch("/api/provider-nodes"),
+          cachedJson("/api/providers"),
+          cachedJson("/api/provider-nodes"),
         ]);
-        const connectionsData = await connectionsRes.json();
-        const nodesData = await nodesRes.json();
-        if (connectionsRes.ok)
-          setConnections(connectionsData.connections || []);
-        if (nodesRes.ok) setProviderNodes(nodesData.nodes || []);
+        if (cancelled) return;
+        if (connectionsRes.ok) setConnections(connectionsRes.data.connections || []);
+        if (nodesRes.ok) setProviderNodes(nodesRes.data.nodes || []);
       } catch (error) {
-        console.log("Error fetching data:", error);
+        if (!cancelled) console.log("Error fetching data:", error);
       } finally {
-        setLoading(false);
+        // Clear the skeleton even on failure — the provider grid renders from
+        // static config either way, so an empty list is a valid state.
+        if (!cancelled) setLoading(false);
       }
     };
     fetchData();
+    // Hard ceiling on the skeleton: never let a stalled request block the page.
+    const t = setTimeout(() => { if (!cancelled) setLoading(false); }, 1500);
+    return () => { cancelled = true; clearTimeout(t); };
   }, []);
 
   const getProviderStats = (providerId, authType) => {
@@ -242,6 +247,7 @@ export default function ProvidersPage() {
         }),
       ),
     );
+    invalidateCache("/api/providers");
   };
 
   const handleBatchTest = async (mode, providerId = null) => {
@@ -315,6 +321,10 @@ export default function ProvidersPage() {
       : apikeyEntries.slice(0, APIKEY_INITIAL_VISIBLE);
   const hiddenApikeyCount = apikeyEntries.length - APIKEY_INITIAL_VISIBLE;
 
+  // The provider grid is built from static config, so a slow or failing
+  // /api/providers read must not hold the page hostage. Show the skeleton
+  // briefly (avoids a flash when the DB is warm) then render regardless;
+  // connection badges populate as the data lands.
   if (loading) {
     return (
       <div className="flex flex-col gap-8">

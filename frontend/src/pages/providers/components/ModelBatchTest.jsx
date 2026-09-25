@@ -21,12 +21,14 @@ function formatElapsed(ms) {
 export default function ModelBatchTest({ models, disabled, testResults, onResult, onBatchActiveChange, onBatchEnd, scopeLocked }) {
   const [scope, setScope] = useState("all");
   const [timeoutMs, setTimeoutMs] = useState(15000);
+  const [concurrency, setConcurrency] = useState(4);
   const [job, setJob] = useState(null); // { jobId, summary, current, startedAt }
   const [batchError, setBatchError] = useState("");
   const [elapsedMs, setElapsedMs] = useState(0);
   const esRef = useRef(null);
   const pollRef = useRef(null);
   const activeRef = useRef(false);
+  const cancelRef = useRef(false);
   const onResultRef = useRef(onResult);
   const onBatchActiveChangeRef = useRef(onBatchActiveChange);
   const onBatchEndRef = useRef(onBatchEnd);
@@ -113,34 +115,63 @@ export default function ModelBatchTest({ models, disabled, testResults, onResult
     }
   }, [applySnapshot, startPolling, stopTransports]);
 
+  // Resolves when a job leaves "running" (used to sequence >200-model chunks).
+  const waitForJobDone = useCallback((jobId) => new Promise((resolve) => {
+    const check = async () => {
+      try {
+        const res = await fetch(`/api/models/test-batch/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+        const snap = await res.json().catch(() => ({}));
+        applySnapshot(snap);
+        if (!activeRef.current || (snap && snap.status && snap.status !== "running")) return resolve();
+      } catch { /* keep polling */ }
+      setTimeout(check, 2000);
+    };
+    check();
+  }), [applySnapshot]);
+
   const startBatch = useCallback(async (entries) => {
     if (activeRef.current || entries.length === 0) return;
     setBatchError("");
     activeRef.current = true;
     onBatchActiveChangeRef.current?.(true);
     setJob({ jobId: null, summary: null, current: null, startedAt: Date.now(), elapsedMs: 0, finished: false, status: "running" });
+    // Backend caps a single job at 200 models: run larger lists as sequential chunks.
+    const CHUNK = 200;
+    const chunks = [];
+    for (let i = 0; i < entries.length; i += CHUNK) chunks.push(entries.slice(i, i + CHUNK));
+    let cancelled = false;
+    cancelRef.current = false;
     try {
-      const res = await fetch("/api/models/test-batch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          models: entries.map((m) => ({ model: m.fullModel, kind: m.kind || "llm" })),
-          concurrency: 4,
-          timeoutMs,
-        }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `Failed to start batch (HTTP ${res.status})`);
-      setJob((j) => ({ ...j, jobId: data.jobId }));
-      subscribe(data.jobId);
-      pollSnapshot(data.jobId);
+      for (const chunk of chunks) {
+        if (cancelled || cancelRef.current) { cancelled = true; break; }
+        activeRef.current = true; // applySnapshot flips it false at each chunk end
+        const res = await fetch("/api/models/test-batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            models: chunk.map((m) => ({ model: m.fullModel, kind: m.kind || "llm" })),
+            concurrency,
+            timeoutMs,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `Failed to start batch (HTTP ${res.status})`);
+        setJob((j) => ({ ...j, jobId: data.jobId, finished: false, status: "running", summary: null, current: null }));
+        subscribe(data.jobId);
+        await waitForJobDone(data.jobId);
+        if (chunks.length > 1) pollSnapshot(data.jobId);
+      }
     } catch (e) {
-      setBatchError(e.message);
-      activeRef.current = false;
-      onBatchActiveChangeRef.current?.(false);
-      setJob(null);
+      if (activeRef.current) setBatchError(e.message);
+      cancelled = true;
+    } finally {
+      if (cancelled || !activeRef.current) {
+        activeRef.current = false;
+        onBatchActiveChangeRef.current?.(false);
+        if (cancelled) setJob(null);
+      }
     }
-  }, [pollSnapshot, subscribe, timeoutMs]);
+  }, [pollSnapshot, subscribe, timeoutMs, concurrency]);
 
   const scopedModels = (s) => {
     if (s === "free") return models.filter((m) => m.isFree);
@@ -157,6 +188,7 @@ export default function ModelBatchTest({ models, disabled, testResults, onResult
 
   const handleCancel = async () => {
     const jobId = job?.jobId;
+    cancelRef.current = true;
     if (!jobId) return;
     try {
       await fetch(`/api/models/test-batch/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
@@ -202,6 +234,19 @@ export default function ModelBatchTest({ models, disabled, testResults, onResult
           <option value="30000">30s timeout</option>
           <option value="60000">60s timeout</option>
           <option value="120000">120s timeout</option>
+        </select>
+        <select
+          value={String(concurrency)}
+          onChange={(e) => setConcurrency(Number(e.target.value))}
+          disabled={active || disabled}
+          className="text-xs bg-background border border-border rounded-lg px-2 py-1.5 text-text-muted focus:outline-none focus:border-primary"
+          title="Parallel tests per batch (backend max 10)"
+        >
+          <option value="1">x1 serial</option>
+          <option value="2">x2 parallel</option>
+          <option value="4">x4 parallel</option>
+          <option value="6">x6 parallel</option>
+          <option value="10">x10 parallel</option>
         </select>
         {failedCount > 0 && !active && (
           <Button onClick={handleRetryFailed} disabled={disabled} variant="ghost">

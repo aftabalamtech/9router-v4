@@ -6,6 +6,7 @@ import { refreshGoogleToken, updateProviderCredentials } from "../../../../sse/s
 import { resolveOllamaLocalHost } from "../../../../../open-sse/config/providers.js";
 import { resolveKiroModels } from "../../../../../open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "../../../../../open-sse/services/qoderModels.js";
+import { fetchWithTimeout } from "../../../../lib/net/fetchWithTimeout.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -360,7 +361,7 @@ const PROVIDER_MODELS_CONFIG = {
   "ollama-local": {
     customResolver: async (connection) => {
       const url = `${resolveOllamaLocalHost(connection)}/api/tags`;
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(url, {
         method: "GET",
         headers: { "Content-Type": "application/json" }
       });
@@ -393,7 +394,7 @@ export async function GET_handler(req, res, { params }) {
         return res.status(400).json({ error: "No base URL configured for OpenAI compatible provider" });
       }
       const url = `${baseUrl.replace(/\/$/, "")}/models`;
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(url, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
@@ -431,7 +432,7 @@ export async function GET_handler(req, res, { params }) {
       }
 
       const url = `${baseUrl}/models`;
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(url, {
         method: "GET",
         headers: {
           "Content-Type": "application/json",
@@ -511,7 +512,7 @@ export async function GET_handler(req, res, { params }) {
       fetchOptions.body = JSON.stringify(config.body);
     }
 
-    const response = await fetch(url, fetchOptions);
+    const response = await fetchWithTimeout(url, fetchOptions);
 
     if (!response.ok) {
       const errorText = await response.text();

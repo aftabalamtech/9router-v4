@@ -6,6 +6,7 @@ import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS } from
 import { openaiToCommandCode } from "../../../../open-sse/translator/request/openai-to-commandcode.js";
 import { PROVIDER_ENDPOINTS } from "../../../shared/constants/config.js";
 import { normalizeProviderId } from "../../../lib/providerNormalization.js";
+import { fetchWithTimeout } from "../../../lib/net/fetchWithTimeout.js";
 
 const fetchWithTimeout = (url, options = {}, timeout = 10000) => {
   const signal = options.signal || AbortSignal.timeout(timeout);
@@ -253,7 +254,7 @@ export async function POST_handler(req, res) {
           return res.json({ valid: false, error: "Missing Account ID" });
         }
         const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`;
-        const cfRes = await fetch(url, {
+        const cfRes = await fetchWithTimeout(url, {
           method: "POST",
           headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -283,7 +284,7 @@ export async function POST_handler(req, res) {
         };
         if (organization) headers["OpenAI-Organization"] = organization;
 
-        const azureRes = await fetch(url, {
+        const azureRes = await fetchWithTimeout(url, {
           method: "POST",
           headers,
           body: JSON.stringify({

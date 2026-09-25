@@ -1,5 +1,6 @@
 
 import { FILTERS } from "./filters.js";
+import { fetchWithTimeout } from "../../../lib/net/fetchWithTimeout.js";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,7 @@ export async function GET_handler(req, res) {
   }
 
   try {
-    const fetchRes = await fetch(url);
+    const fetchRes = await fetchWithTimeout(url, { timeoutMs: 10000, redirect: "follow" });
     if (!fetchRes.ok) {
       return res.json({ data: [] });
     }

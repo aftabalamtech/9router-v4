@@ -168,9 +168,37 @@ async function runSyncJob(job) {
     }
     eligible = eligible.slice(0, SYNC_MAX_CONNECTIONS);
     if (eligible.length === 0) {
+      // Credential-free providers (opencode, local-device, local TTS, searxng)
+      // have no connections by design. Fall back to their public catalog
+      // instead of failing, otherwise their models can never be registered.
+      if (job.noAuthDiscoverFn) {
+        job.current = job.providerId;
+        job.emitter.emit("update", syncJobSnapshot(job));
+        const result = await job.noAuthDiscoverFn(job.providerId);
+        if (result.models.length > 0) {
+          const persist = await persistDiscovered({
+            storageAlias: job.storageAlias,
+            discovered: result.models,
+            manualIds: job.manualIds,
+          });
+          job.summary.discovered = result.models.length;
+          job.summary.added = persist.added;
+          job.summary.updated = persist.updated;
+          job.summary.stale = persist.stale;
+          const stamped = await markSyncTimestamp(job.providerId);
+          job.summary.lastSyncAt = stamped.lastSyncAt;
+          job.summary.durationMs = Date.now() - startedAt;
+        } else {
+          job.summary.failed = 1;
+          job.error = result.error || "No models discovered";
+        }
+      } else {
+        job.error = "No active connections for this provider";
+      }
       job.status = "done";
-      job.error = "No active connections for this provider";
+      job.current = null;
       job.finishedAt = Date.now();
+      job.emitter.emit("update", syncJobSnapshot(job));
       job.emitter.emit("done", syncJobSnapshot(job));
       return;
     }
@@ -248,7 +276,7 @@ function validateId(value, label) {
   return value;
 }
 
-export async function createSyncJob({ providerId, storageAlias, connectionIds, manualIds, discoverFn, resolveConnections }) {
+export async function createSyncJob({ providerId, storageAlias, connectionIds, manualIds, discoverFn, resolveConnections, noAuthDiscoverFn }) {
   validateId(providerId, "providerId");
   validateId(storageAlias, "storageAlias");
   sweepExpiredJobs();
@@ -279,6 +307,9 @@ export async function createSyncJob({ providerId, storageAlias, connectionIds, m
     emitter: new EventEmitter(),
     lockKey,
     discoverFn: discoverFn || ((connectionId) => fetchConnectionModels(connectionId)),
+    // Only meaningful for noAuth providers; keeps the dependency lazy so the
+    // suggested-models filter table is not pulled into every sync import path.
+    noAuthDiscoverFn: noAuthDiscoverFn || null,
     resolveConnections: resolveConnections || (() => getProviderConnections({ isActive: true })),
   };
   jobs.set(job.id, job);

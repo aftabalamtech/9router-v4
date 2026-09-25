@@ -1,9 +1,10 @@
 
-import { useState } from "react";
+import { useState, Suspense } from "react";
 import { useLocation, Outlet } from 'react-router-dom';
 import { useNotificationStore } from "@/store/notificationStore";
 import Sidebar from "../Sidebar";
 import Header from "../Header";
+import { PageFallback } from "../PageFallback";
 
 function getToastStyle(type) {
   if (type === "success") {
@@ -93,9 +94,13 @@ export default function DashboardLayout() {
       <main className="flex flex-col flex-1 h-full min-w-0 relative transition-colors duration-300 isolate">
         {/* Faint grid background */}
         <div className="landing-grid absolute inset-0 pointer-events-none -z-10" aria-hidden="true" />
-        <Header key={pathname} onMenuClick={() => setSidebarOpen(true)} />
+        <Header onMenuClick={() => setSidebarOpen(true)} />
         <div className={`flex-1 overflow-y-auto custom-scrollbar ${pathname === "/dashboard/basic-chat" || pathname === "/dashboard/docs" ? "" : "p-6 lg:p-10"} ${pathname === "/dashboard/basic-chat" || pathname === "/dashboard/docs" ? "flex flex-col overflow-hidden" : ""}`}>
-          <div className={`${pathname === "/dashboard/basic-chat" || pathname === "/dashboard/docs" ? "flex-1 w-full h-full flex flex-col" : "max-w-7xl mx-auto"}`}><Outlet /></div>
+          {/* Suspense lives here, not around the whole router: a lazy page chunk
+              loading no longer tears down the sidebar and header. */}
+          <Suspense fallback={<PageFallback />}>
+            <div className={`${pathname === "/dashboard/basic-chat" || pathname === "/dashboard/docs" ? "flex-1 w-full h-full flex flex-col" : "max-w-7xl mx-auto"}`}><Outlet /></div>
+          </Suspense>
         </div>
       </main>
     </div>

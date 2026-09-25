@@ -1,6 +1,7 @@
 
 import { useEffect, useState } from "react";
 import PropTypes from "prop-types";
+import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
 import Card from "./Card";
 import Select from "./Select";
 import Badge from "./Badge";
@@ -16,10 +17,12 @@ export default function NoAuthProxyCard({ providerId }) {
   useEffect(() => {
     let cancelled = false;
     Promise.all([
-      fetch("/api/proxy-pools?isActive=true", { cache: "no-store" }).then((r) => r.ok ? r.json() : { proxyPools: [] }),
-      fetch("/api/settings", { cache: "no-store" }).then((r) => r.ok ? r.json() : {}),
-    ]).then(([poolData, settingsData]) => {
+      cachedJson("/api/proxy-pools?isActive=true"),
+      cachedJson("/api/settings"),
+    ]).then(([poolRes, settingsRes]) => {
       if (cancelled) return;
+      const poolData = poolRes.data || {};
+      const settingsData = settingsRes.data || {};
       setProxyPools(poolData.proxyPools || []);
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProxyPoolId(override.proxyPoolId || NONE_PROXY_POOL_VALUE);
@@ -31,8 +34,10 @@ export default function NoAuthProxyCard({ providerId }) {
     setProxyPoolId(newValue);
     setSaving(true);
     try {
-      const res = await fetch("/api/settings", { cache: "no-store" });
-      const data = res.ok ? await res.json() : {};
+      // Read-modify-write: always bypass the cache so a concurrent settings
+      // update from another card is not clobbered by a stale snapshot.
+      const res = await cachedJson("/api/settings", { force: true });
+      const data = res.data || {};
       const current = data.providerStrategies || {};
       const override = { ...(current[providerId] || {}) };
       if (newValue === NONE_PROXY_POOL_VALUE) delete override.proxyPoolId;
@@ -45,6 +50,7 @@ export default function NoAuthProxyCard({ providerId }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ providerStrategies: updated }),
       });
+      invalidateCache("/api/settings");
       setSavedFlash(true);
       setTimeout(() => setSavedFlash(false), 1500);
     } catch (e) {

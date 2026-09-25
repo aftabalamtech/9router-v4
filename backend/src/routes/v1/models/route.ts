@@ -9,6 +9,7 @@ import { getProviderConnections, getCombos, getCustomModels, getModelAliases } f
 import { getDisabledModels } from "../../../lib/disabledModelsDb.js";
 import { resolveKiroModels } from "../../../../open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "../../../../open-sse/services/qoderModels.js";
+import { fetchWithTimeout } from "../../../lib/net/fetchWithTimeout.js";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -105,15 +106,14 @@ async function fetchCompatibleModelIds(connection) {
   }
 
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    const response = await fetch(url, {
+    // Time-boxed so a stalled upstream cannot hold the request open; the timer
+    // is cleared in finally so a throw does not leak it for the process life.
+    const response = await fetchWithTimeout(url, {
       method: "GET",
       headers,
       cache: "no-store",
-      signal: controller.signal,
+      timeoutMs: 5000,
     });
-    clearTimeout(timeoutId);
 
     if (!response.ok) return [];
 

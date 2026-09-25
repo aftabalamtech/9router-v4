@@ -1,8 +1,9 @@
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import PropTypes from "prop-types";
 import { Card, Button, Modal } from "@/shared/components";
 import { getModelsByProviderId } from "@/shared/constants/models";
+import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
 import { getProviderAlias } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import ModelBatchTest from "./ModelBatchTest";
@@ -114,7 +115,9 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
   const [modelAliases, setModelAliases] = useState({});
   const [customModels, setCustomModels] = useState([]);
   const [modelTestResults, setModelTestResults] = useState({});
-  const [testingModelId, setTestingModelId] = useState(null);
+  const [testingModelIds, setTestingModelIds] = useState([]);
+  const inflightTestRef = useRef(null);
+  if (inflightTestRef.current === null) inflightTestRef.current = new Set();
   const [batchTestingIds, setBatchTestingIds] = useState([]);
   const [testError, setTestError] = useState("");
   const [showAddCustomModel, setShowAddCustomModel] = useState(false);
@@ -126,13 +129,13 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
   const fetchData = useCallback(async () => {
     try {
       const [aliasRes, connRes, customRes] = await Promise.all([
-        fetch("/api/models/alias"),
-        fetch("/api/providers", { cache: "no-store" }),
-        fetch("/api/models/custom", { cache: "no-store" }),
+        cachedJson("/api/models/alias"),
+        cachedJson("/api/providers"),
+        cachedJson("/api/models/custom"),
       ]);
-      const aliasData = await aliasRes.json();
-      const connData = await connRes.json();
-      const customData = await customRes.json();
+      const aliasData = aliasRes.data || {};
+      const connData = connRes.data || {};
+      const customData = customRes.data || {};
       if (aliasRes.ok) setModelAliases(aliasData.aliases || {});
       if (connRes.ok) setConnections((connData.connections || []).filter((c) => c.provider === providerId));
       if (customRes.ok) setCustomModels(customData.models || []);
@@ -146,9 +149,9 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/api/models/test-results?providerAlias=${encodeURIComponent(providerAlias)}`, { cache: "no-store" });
+        const res = await cachedJson(`/api/models/test-results?providerAlias=${encodeURIComponent(providerAlias)}`);
         if (!res.ok || cancelled) return;
-        const data = await res.json();
+        const data = res.data || {};
         const mapped = {};
         for (const [fullModel, r] of Object.entries(data.results || {})) {
           const id = fullModel.includes("/") ? fullModel.split("/").pop() : fullModel;
@@ -169,14 +172,14 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: fullModel, alias }),
       });
-      if (res.ok) await fetchData();
+      if (res.ok) { invalidateCache("/api/models/alias"); await fetchData(); }
     } catch (e) { console.log("set alias error:", e); }
   };
 
   const handleDeleteAlias = async (alias) => {
     try {
       const res = await fetch(`/api/models/alias?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
-      if (res.ok) await fetchData();
+      if (res.ok) { invalidateCache("/api/models/alias"); await fetchData(); }
     } catch (e) { console.log("delete alias error:", e); }
   };
 
@@ -188,6 +191,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
         body: JSON.stringify({ providerAlias, id: modelId, type: effectiveType }),
       });
       if (res.ok) {
+        invalidateCache("/api/models/custom");
         await fetchData();
         window.dispatchEvent(new CustomEvent("customModelChanged"));
       }
@@ -199,6 +203,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
       const params = new URLSearchParams({ providerAlias, id: modelId, type: effectiveType });
       const res = await fetch(`/api/models/custom?${params}`, { method: "DELETE" });
       if (res.ok) {
+        invalidateCache("/api/models/custom");
         await fetchData();
         window.dispatchEvent(new CustomEvent("customModelChanged"));
       }
@@ -220,8 +225,9 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
   }, []);
 
   const handleTestModel = async (modelId) => {
-    if (testingModelId) return;
-    setTestingModelId(modelId);
+    if (inflightTestRef.current.has(modelId)) return;
+    inflightTestRef.current.add(modelId);
+    setTestingModelIds((prev) => (prev.includes(modelId) ? prev : [...prev, modelId]));
     try {
       const res = await fetch("/api/models/test", {
         method: "POST",
@@ -234,7 +240,10 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
     } catch {
       setModelTestResults((prev) => ({ ...prev, [modelId]: "error" }));
       setTestError("Network error");
-    } finally { setTestingModelId(null); }
+    } finally {
+      inflightTestRef.current.delete(modelId);
+      setTestingModelIds((prev) => prev.filter((id) => id !== modelId));
+    }
   };
 
   // Built-in models — filter by kindFilter if provided
@@ -290,7 +299,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
                 onDeleteAlias={() => handleDeleteAlias(existingAlias)}
                 testStatus={modelTestResults[model.id]}
                 onTest={connections.length > 0 ? () => handleTestModel(model.id) : undefined}
-                isTesting={testingModelId === model.id || batchTestingIds.includes(model.id)}
+                isTesting={testingModelIds.includes(model.id) || batchTestingIds.includes(model.id)}
                 isFree={model.isFree}
               />
             );
@@ -307,7 +316,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
               onDeleteAlias={() => handleDeleteCustomModel(model.id)}
               testStatus={modelTestResults[model.id]}
               onTest={connections.length > 0 ? () => handleTestModel(model.id) : undefined}
-              isTesting={testingModelId === model.id || batchTestingIds.includes(model.id)}
+              isTesting={testingModelIds.includes(model.id) || batchTestingIds.includes(model.id)}
               isCustom
             />
           ))}

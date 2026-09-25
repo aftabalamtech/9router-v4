@@ -10,6 +10,7 @@ import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, GITHUB_CONFIG } from "@/shared/constants/config";
 import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS } from "@/shared/constants/providers";
 import { translate } from "@/i18n/runtime";
+import { cachedJson, clearAllCache } from "@/shared/utils/cachedJson";
 
 const getPageInfo = (pathname) => {
   if (!pathname) return { title: "", description: "", breadcrumbs: [] };
@@ -183,9 +184,10 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
  
     async function loadAuthStatus() {
       try {
-        const res = await fetch("/api/auth/status", { cache: "no-store" });
+        // Cached + deduped: the header re-mounting must not refire this.
+        const res = await cachedJson("/api/auth/status", { ttl: 60000 });
         if (!res.ok) return;
-        const data = await res.json();
+        const data = res.data;
         if (!cancelled) {
           setDisplayName(data?.displayName || data?.oidcName || data?.oidcEmail || "");
           setLoginMethod(data?.loginMethod || "");
@@ -211,6 +213,7 @@ export default function Header({ onMenuClick, showMenuButton = true }) {
       const res = await fetch("/api/auth/logout", { method: "POST" });
       if (res.ok) {
         localStorage.removeItem("9r_authed");
+        clearAllCache();
         navigate("/login?force=true");
         navigate(0);
       }

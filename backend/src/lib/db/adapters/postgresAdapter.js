@@ -146,7 +146,19 @@ export async function createPostgresAdapter(connectionString) {
   const pool = new Pool({ connectionString });
   pool.on("error", (error) => console.error("[DB] PostgreSQL pool error:", error));
 
-  const bootstrapClient = await pool.connect();
+  let bootstrapClient;
+  try {
+    bootstrapClient = await pool.connect();
+  } catch (error) {
+    // Fail fast with an actionable message. Never fall back to SQLite here:
+    // silently splitting data between two databases would corrupt state.
+    await pool.end().catch(() => {});
+    throw new Error(
+      `[DB] Cannot reach PostgreSQL (DATABASE_URL is set). ` +
+      `Fix the connection string or unset DATABASE_URL to use SQLite. ` +
+      `Underlying error: ${error?.message || error}`
+    );
+  }
   try {
     await syncSchema(bootstrapClient);
   } finally {

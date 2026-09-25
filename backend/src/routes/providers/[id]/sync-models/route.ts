@@ -1,4 +1,5 @@
-import { getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "../../../../shared/constants/providers.js";
+import { getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "../../../../shared/constants/providers.js";
+import { discoverNoAuthProviderModels } from "../../../../lib/models/discoverNoAuth.js";
 import {
   createSyncJob,
   getSyncSettings,
@@ -66,6 +67,9 @@ export async function POST_handler(req, res, { params }) {
       storageAlias: resolveStorageAlias(id, storageAlias),
       connectionIds,
       manualIds,
+      // Providers that need no credentials are synced from their public
+      // catalog; without this they always fail with "No active connections".
+      noAuthDiscoverFn: AI_PROVIDERS[id]?.noAuth ? discoverNoAuthProviderModels : null,
     });
     return res.status(202).json({
       jobId: job.id,

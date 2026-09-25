@@ -5,8 +5,17 @@ import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "../../shared/constants/providers.js";
 import * as log from "../utils/logger.js";
 
-// Mutex to prevent race conditions during account selection
-let selectionMutex = Promise.resolve();
+// Per-provider mutexes to prevent race conditions during account selection
+// without serializing unrelated providers behind one global lock.
+const selectionMutexes = new Map();
+function acquireProviderMutex(providerId) {
+  const key = providerId || "__default__";
+  const current = selectionMutexes.get(key) || Promise.resolve();
+  let release;
+  const next = new Promise((resolve) => { release = resolve; });
+  selectionMutexes.set(key, next);
+  return current.then(() => release);
+}
 
 /**
  * Get provider credentials from localDb
@@ -21,16 +30,14 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     ? excludeConnectionIds
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
-  // Acquire mutex to prevent race conditions
-  const currentMutex = selectionMutex;
-  let resolveMutex;
-  selectionMutex = new Promise(resolve => { resolveMutex = resolve; });
+  // Acquire the per-provider mutex to prevent race conditions.
+  // Resolve the alias first so "kc" and "kilocode" share one lock.
+  const earlyProviderId = resolveProviderId(provider);
+  const releaseMutex = await acquireProviderMutex(earlyProviderId);
 
   try {
-    await currentMutex;
-
     // Resolve alias to provider ID (e.g., "kc" -> "kilocode")
-    const providerId = resolveProviderId(provider);
+    const providerId = earlyProviderId;
 
     // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings).
     // If the user added a real connection (e.g. a free API key), prefer it —
@@ -207,7 +214,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       _connection: connection
     };
   } finally {
-    if (resolveMutex) resolveMutex();
+    releaseMutex();
   }
 }
 

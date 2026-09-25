@@ -77,9 +77,30 @@ async function start() {
   });
 
   // Serve the production SPA from the same origin as the API.
-  app.use(express.static(FRONTEND_DIST, { index: false, redirect: false }));
+  // Vite emits content-hashed filenames under /assets, so those are immutable
+  // and safe to cache for a year. Without this express sends `max-age=0`, which
+  // forces the 272 KB icon font plus every JS chunk to be re-downloaded on
+  // every single page load. The font file and index.html are NOT hashed, so they
+  // stay revalidated to keep a redeploy from serving a stale shell.
+  app.use(
+    express.static(FRONTEND_DIST, {
+      index: false,
+      redirect: false,
+      setHeaders(res, filePath) {
+        if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        } else if (filePath.endsWith(".woff2") || filePath.endsWith(".woff")) {
+          res.setHeader("Cache-Control", "public, max-age=604800");
+        } else {
+          res.setHeader("Cache-Control", "public, max-age=0, must-revalidate");
+        }
+      },
+    })
+  );
   app.use((req, res, next) => {
-    if (req.method === "GET" && req.accepts("html")) {
+    // Accept HEAD as well as GET so cache/probe tooling can inspect the shell.
+    if ((req.method === "GET" || req.method === "HEAD") && req.accepts("html")) {
+      res.setHeader("Cache-Control", "public, max-age=0, must-revalidate");
       return res.sendFile(path.join(FRONTEND_DIST, "index.html"), (err) => {
         if (err && !res.headersSent) return next();
       });

@@ -293,13 +293,27 @@ input, textarea {
 .traffic-light.yellow { background: #FFBD2E; }
 .traffic-light.green { background: #27C93F; }
 
-/* Self-hosted so dashboard icons do not depend on Google Fonts at runtime. */
+/* Self-hosted so dashboard icons do not depend on Google Fonts at runtime.
+   Both faces are static instances of the variable font (opsz 24 / wght 400 /
+   GRAD 0) subset to the ~156 icon names the app actually renders, which is
+   272 KB + 332 KB instead of a single 3.96 MB variable file.
+   `swap` is deliberate: `block` holds icons invisible for up to 3s and then
+   paints the ligature name in the fallback face at full text size, which is
+   exactly how "api"/"dns"/"memory" showed up as giant words. Swap paints an
+   empty box of the same width instead, so the layout never shifts. */
 @font-face {
   font-family: 'Material Symbols Outlined';
   font-style: normal;
-  font-weight: 100 700;
-  font-display: block;
+  font-weight: normal;
+  font-display: swap;
   src: url('/fonts/material-symbols-outlined.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Material Symbols Filled';
+  font-style: normal;
+  font-weight: normal;
+  font-display: swap;
+  src: url('/fonts/material-symbols-filled.woff2') format('woff2');
 }
 
 /* Material Symbols */
@@ -318,10 +332,14 @@ input, textarea {
   font-feature-settings: 'liga';
   -webkit-font-feature-settings: 'liga';
   -webkit-font-smoothing: antialiased;
-  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  font-variation-settings: normal;
+  /* Reserve the icon's box before the font arrives: without this the fallback
+     word ("progress_activity") is far wider and reflows the row on swap. */
+  min-width: 1em;
+  text-align: center;
 }
 .material-symbols-outlined.fill-1 {
-  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  font-family: 'Material Symbols Filled', sans-serif;
 }
 
 /* Disable text selection on buttons */

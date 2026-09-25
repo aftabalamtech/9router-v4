@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import PropTypes from "prop-types";
 import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal, ConfirmModal } from "@/shared/components";
+import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 
 // ── CooldownTimer ──────────────────────────────────────────────
@@ -369,13 +370,13 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
   const fetch_ = useCallback(async () => {
     try {
       const [connRes, proxyRes, settingsRes] = await Promise.all([
-        fetch("/api/providers", { cache: "no-store" }),
-        fetch("/api/proxy-pools?isActive=true", { cache: "no-store" }),
-        fetch("/api/settings", { cache: "no-store" }),
+        cachedJson("/api/providers"),
+        cachedJson("/api/proxy-pools?isActive=true"),
+        cachedJson("/api/settings"),
       ]);
-      const connData = await connRes.json();
-      const proxyData = await proxyRes.json();
-      const settingsData = settingsRes.ok ? await settingsRes.json() : {};
+      const connData = connRes.data || {};
+      const proxyData = proxyRes.data || {};
+      const settingsData = settingsRes.data || {};
       if (connRes.ok) setConnections((connData.connections || []).filter((c) => c.provider === providerId));
       if (proxyRes.ok) setProxyPools(proxyData.proxyPools || []);
       const override = (settingsData.providerStrategies || {})[providerId] || {};
@@ -389,8 +390,9 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
 
   const saveStrategy = async (strategy, stickyLimit) => {
     try {
-      const res = await fetch("/api/settings", { cache: "no-store" });
-      const data = res.ok ? await res.json() : {};
+      // Read-modify-write: bypass the cache to avoid clobbering a concurrent update.
+      const res = await cachedJson("/api/settings", { force: true });
+      const data = res.data || {};
       const current = data.providerStrategies || {};
       const override = {};
       if (strategy) override.fallbackStrategy = strategy;
@@ -399,6 +401,7 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
       if (Object.keys(override).length === 0) delete updated[providerId];
       else updated[providerId] = override;
       await fetch("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ providerStrategies: updated }) });
+      invalidateCache("/api/settings");
     } catch (e) { console.log("saveStrategy error:", e); }
   };
 
@@ -411,6 +414,7 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
         fetch(`/api/providers/${next[i1].id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ priority: i1 }) }),
         fetch(`/api/providers/${next[i2].id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ priority: i2 }) }),
       ]);
+      invalidateCache("/api/providers");
     } catch { await fetch_(); }
   };
 
@@ -422,7 +426,7 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
         setConfirmState(null);
         try {
           const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
-          if (res.ok) setConnections((prev) => prev.filter((c) => c.id !== id));
+          if (res.ok) { invalidateCache("/api/providers"); setConnections((prev) => prev.filter((c) => c.id !== id)); }
         } catch (e) { console.log("delete error:", e); }
       }
     });
@@ -431,7 +435,7 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
   const handleToggleActive = async (id, isActive) => {
     try {
       const res = await fetch(`/api/providers/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ isActive }) });
-      if (res.ok) setConnections((prev) => prev.map((c) => c.id === id ? { ...c, isActive } : c));
+      if (res.ok) { invalidateCache("/api/providers"); setConnections((prev) => prev.map((c) => c.id === id ? { ...c, isActive } : c)); }
     } catch (e) { console.log("toggle error:", e); }
   };
 

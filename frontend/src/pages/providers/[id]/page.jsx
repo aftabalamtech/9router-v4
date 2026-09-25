@@ -9,6 +9,7 @@ import { getModelsByProviderId } from "@/shared/constants/models";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { translate } from "@/i18n/runtime";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
+import { cachedJson } from "@/shared/utils/cachedJson";
 import ModelRow from "./ModelRow";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
@@ -46,7 +47,9 @@ export default function ProviderDetailPage() {
   const [headerImgError, setHeaderImgError] = useState(false);
   const [modelTestResults, setModelTestResults] = useState({});
   const [modelsTestError, setModelsTestError] = useState("");
-  const [testingModelId, setTestingModelId] = useState(null);
+  const [testingModelIds, setTestingModelIds] = useState([]);
+  const inflightTestRef = useRef(null);
+  if (inflightTestRef.current === null) inflightTestRef.current = new Set();
   const [batchTestingIds, setBatchTestingIds] = useState([]);
   const [showAddCustomModel, setShowAddCustomModel] = useState(false);
   const [selectedConnectionIds, setSelectedConnectionIds] = useState([]);
@@ -57,6 +60,7 @@ export default function ProviderDetailPage() {
   const [thinkingMode, setThinkingMode] = useState("auto");
   const [suggestedModels, setSuggestedModels] = useState([]);
   const [kiloFreeModels, setKiloFreeModels] = useState([]);
+  const [syncedModels, setSyncedModels] = useState([]);
   const [disabledModelIds, setDisabledModelIds] = useState([]);
   const [confirmState, setConfirmState] = useState(null);
   const [showAgRiskModal, setShowAgRiskModal] = useState(false);
@@ -223,6 +227,22 @@ export default function ProviderDetailPage() {
     }
   }, []);
 
+  // Models discovered by provider sync. These belong in the Available Models
+  // list and in the Test all scope, otherwise a synced model is only visible
+  // inside the sync panel and cannot be batch-tested.
+  const fetchSyncedModels = useCallback(async (alias) => {
+    if (!alias) { setSyncedModels([]); return; }
+    try {
+      const res = await fetch(`/api/models/synced?storageAlias=${encodeURIComponent(alias)}`);
+      const data = await res.json();
+      if (res.ok) setSyncedModels(data.models || []);
+      else setSyncedModels([]);
+    } catch (error) {
+      console.log("Error fetching synced models:", error);
+      setSyncedModels([]);
+    }
+  }, []);
+
   // Fetch free models from Kilo API for kilocode provider
   useEffect(() => {
     if (providerId !== "kilocode") return;
@@ -235,15 +255,15 @@ export default function ProviderDetailPage() {
   const fetchConnections = useCallback(async () => {
     try {
       const [connectionsRes, nodesRes, proxyPoolsRes, settingsRes] = await Promise.all([
-        fetch("/api/providers", { cache: "no-store" }),
-        fetch("/api/provider-nodes", { cache: "no-store" }),
-        fetch("/api/proxy-pools?isActive=true", { cache: "no-store" }),
-        fetch("/api/settings", { cache: "no-store" }),
+        cachedJson("/api/providers"),
+        cachedJson("/api/provider-nodes"),
+        cachedJson("/api/proxy-pools?isActive=true"),
+        cachedJson("/api/settings"),
       ]);
-      const connectionsData = await connectionsRes.json();
-      const nodesData = await nodesRes.json();
-      const proxyPoolsData = await proxyPoolsRes.json();
-      const settingsData = settingsRes.ok ? await settingsRes.json() : {};
+      const connectionsData = connectionsRes.data;
+      const nodesData = nodesRes.data;
+      const proxyPoolsData = proxyPoolsRes.data;
+      const settingsData = settingsRes.data || {};
       if (connectionsRes.ok) {
         const filtered = (connectionsData.connections || []).filter(c => c.provider === providerId);
         setConnections(filtered);
@@ -266,9 +286,9 @@ export default function ProviderDetailPage() {
         if (!node && isCompatible) {
           for (let attempt = 0; attempt < 3; attempt += 1) {
             await new Promise((resolve) => setTimeout(resolve, 150));
-            const retryRes = await fetch("/api/provider-nodes", { cache: "no-store" });
+            const retryRes = await cachedJson("/api/provider-nodes", { force: true });
             if (!retryRes.ok) continue;
-            const retryData = await retryRes.json();
+            const retryData = retryRes.data;
             node = (retryData.nodes || []).find((entry) => entry.id === providerId) || null;
             if (node) break;
           }
@@ -374,7 +394,8 @@ export default function ProviderDetailPage() {
     fetchConnections();
     fetchAliases();
     fetchDisabledModels();
-  }, [fetchConnections, fetchAliases, fetchDisabledModels]);
+    fetchSyncedModels(providerStorageAlias);
+  }, [fetchConnections, fetchAliases, fetchDisabledModels, fetchSyncedModels, providerStorageAlias]);
 
   // Fetch suggested models from provider's public API (if configured)
   useEffect(() => {
@@ -878,8 +899,9 @@ export default function ProviderDetailPage() {
   );
 
   const handleTestModel = async (modelId, kind = "llm") => {
-    if (testingModelId) return;
-    setTestingModelId(modelId);
+    if (inflightTestRef.current.has(modelId)) return;
+    inflightTestRef.current.add(modelId);
+    setTestingModelIds((prev) => (prev.includes(modelId) ? prev : [...prev, modelId]));
     try {
       const res = await fetch("/api/models/test", {
         method: "POST",
@@ -893,7 +915,8 @@ export default function ProviderDetailPage() {
       setModelTestResults((prev) => ({ ...prev, [modelId]: "error" }));
       setModelsTestError("Network error");
     } finally {
-      setTestingModelId(null);
+      inflightTestRef.current.delete(modelId);
+      setTestingModelIds((prev) => prev.filter((id) => id !== modelId));
     }
   };
 
@@ -927,13 +950,21 @@ export default function ProviderDetailPage() {
         />
       );
     }
-    // Combine hardcoded models with Kilo free models (deduplicated)
+    // Combine hardcoded models with Kilo free models and sync-discovered
+    // models (all deduplicated by exact model id). Sync-discovered models must
+    // appear here — not only inside the sync panel — so they are visible and
+    // batch-testable from the same list.
     // Filter models to only those matching this provider's service kinds
     const providerServiceKinds = AI_PROVIDERS[providerId]?.serviceKinds || ["llm"];
     const isLlmProvider = providerServiceKinds.includes("llm");
+    const discoveredModels = syncedModels
+      .filter((m) => m.storageAlias === providerStorageAlias || m.providerAlias === providerStorageAlias)
+      .map((m) => ({ id: m.id, name: m.name || m.id, type: m.type || "llm", isFree: !!m.isFree }));
     const allModels = [
       ...models,
       ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
+      ...discoveredModels.filter((dm) => !models.some((m) => m.id === dm.id)
+        && !kiloFreeModels.some((fm) => fm.id === dm.id)),
     ].filter((m) => {
       // Models without type are LLM
       const modelType = m.type || "llm";
@@ -951,10 +982,12 @@ export default function ProviderDetailPage() {
         const prefix = `${providerStorageAlias}/`;
         if (!fullModel.startsWith(prefix)) return false;
         const modelId = fullModel.slice(prefix.length);
-        // Only show if not already in hardcoded list
+        // Skip anything already shown as a built-in/discovered chip, otherwise
+        // a synced model that also has an alias entry would render twice.
+        if (allModels.some((m) => m.id === modelId)) return false;
         // For passthroughModels, include all aliases (model IDs may contain slashes like "anthropic/claude-3")
-        if (providerInfo.passthroughModels) return !models.some((m) => m.id === modelId);
-        return !models.some((m) => m.id === modelId) && alias === modelId;
+        if (providerInfo.passthroughModels) return true;
+        return alias === modelId;
       })
       .map(([alias, fullModel]) => ({
         id: fullModel.slice(`${providerStorageAlias}/`.length),
@@ -967,6 +1000,23 @@ export default function ProviderDetailPage() {
     const imageModels = displayModels.filter(m => m.type === 'image');
     const videoModels = displayModels.filter(m => m.type === 'video');
     const llmModels   = displayModels.filter(m => !m.type || m.type === 'llm');
+
+    // Everything rendered as an enabled model chip below (built-in + custom),
+    // excluding disabled ones — this is what "Test all" must actually cover.
+    const testableModels = [
+      ...displayModels.map((m) => ({
+        id: m.id,
+        fullModel: `${providerStorageAlias}/${m.id}`,
+        kind: m.type || "llm",
+        isFree: !!m.isFree,
+      })),
+      ...customModels.map((m) => ({
+        id: m.id,
+        fullModel: `${providerStorageAlias}/${m.id}`,
+        kind: "llm",
+        isFree: false,
+      })),
+    ];
 
     const renderModelChips = (modelList) => modelList.map((model) => {
       const fullModel = `${providerStorageAlias}/${model.id}`;
@@ -986,7 +1036,7 @@ export default function ProviderDetailPage() {
           onDeleteAlias={() => handleDeleteAlias(existingAlias)}
           testStatus={modelTestResults[model.id]}
           onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id, model.type || "llm") : undefined}
-          isTesting={testingModelId === model.id || batchTestingIds.includes(model.id)}
+          isTesting={testingModelIds.includes(model.id) || batchTestingIds.includes(model.id)}
           isFree={model.isFree}
           onDisable={() => handleDisableModel(model.id)}
         />
@@ -1015,11 +1065,15 @@ export default function ProviderDetailPage() {
     return (
       <div className="flex flex-col gap-2">
         {/* Custom models first */}
-        {customModels.length > 0 && (
+        {testableModels.length > 0 && (
           <>
-            {hasMultipleKinds && <SectionHeader icon="star" label="Custom" count={customModels.length} />}
+            {hasMultipleKinds && customModels.length > 0 && <SectionHeader icon="star" label="Custom" count={customModels.length} />}
+            {/* Batch-test every model rendered below, not just the custom ones.
+                Previously this only received `customModels`, so a provider with
+                built-in or discovered models reported a count far below the
+                models actually shown and testable. */}
             <ModelBatchTest
-              models={customModels.map((m) => ({ id: m.id, fullModel: `${providerStorageAlias}/${m.id}`, kind: "llm", isFree: false }))}
+              models={testableModels}
               disabled={connections.length === 0 && !isFreeNoAuth}
               testResults={modelTestResults}
               onResult={handleBatchResult}
@@ -1038,7 +1092,7 @@ export default function ProviderDetailPage() {
                   onDeleteAlias={() => handleDeleteAlias(model.alias)}
                   testStatus={modelTestResults[model.id]}
                   onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
-                  isTesting={testingModelId === model.id || batchTestingIds.includes(model.id)}
+                  isTesting={testingModelIds.includes(model.id) || batchTestingIds.includes(model.id)}
                   isCustom
                   isFree={false}
                 />
@@ -1672,7 +1726,7 @@ export default function ProviderDetailPage() {
             modelAliases={modelAliases}
             hardcodedIds={models.map((m) => m.id)}
             onAddModel={(modelId) => handleSetAlias(modelId, modelId.split("/").pop(), providerStorageAlias)}
-            onCatalogChanged={() => { fetchAliases(); }}
+            onCatalogChanged={() => { fetchAliases(); fetchSyncedModels(providerStorageAlias); }}
           />
         )}
         {renderModelsSection()}

@@ -44,9 +44,16 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 }
 
 function LoadingFallback() {
+  // Only used for the public routes (login/landing) and the very first paint.
+  // Styled with the app's own tokens so there is no unstyled white flash.
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" }}>
-      <span>Loading...</span>
+    <div
+      className="flex min-h-screen w-full items-center justify-center bg-bg text-text-muted"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <span className="material-symbols-outlined animate-spin">progress_activity</span>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import PropTypes from "prop-types";
 import { Button } from "@/shared/components";
+import { AI_PROVIDERS } from "@/shared/constants/providers";
 
 const POLL_INTERVAL_MS = 2500;
 const AUTO_SYNC_COOLDOWN_MS = 60 * 60 * 1000;
@@ -239,31 +240,35 @@ export default function ModelSyncPanel({
     && !hardcodedSet.has(m.id));
 
   const activeConnections = (connections || []).filter((c) => c.isActive !== false);
-  const canSync = activeConnections.length > 0 && !job?.jobId;
+  // Credential-free providers (opencode, local-device, local TTS, searxng) are
+  // synced from their public catalog and have no connections by design, so they
+  // must not be blocked by the connection requirement.
+  const isNoAuth = Boolean(AI_PROVIDERS[providerId]?.noAuth);
+  const canSync = (activeConnections.length > 0 || isNoAuth) && !job?.jobId;
   const running = !!job && !job.finished;
   const summary = job?.summary;
 
   // Auto-fetch: catalog empty + nothing added yet → sync once (opt-in only).
   useEffect(() => {
     if (!settings.autoFetch || autoRanRef.current.fetch || activeRef.current) return;
-    if (activeConnections.length === 0) return;
+    if (activeConnections.length === 0 && !isNoAuth) return;
     if (status.syncedCount > 0) return;
     const prefix = `${providerStorageAlias}/`;
     const hasAdded = Object.values(modelAliases || {}).some((f) => typeof f === "string" && f.startsWith(prefix));
     if (hasAdded) return;
     autoRanRef.current.fetch = true;
     startSync();
-  }, [settings.autoFetch, activeConnections.length, status.syncedCount, modelAliases, providerStorageAlias, startSync]);
+  }, [settings.autoFetch, activeConnections.length, isNoAuth, status.syncedCount, modelAliases, providerStorageAlias, startSync]);
 
   // Auto-sync: refresh when never synced or cooldown elapsed (opt-in only).
   useEffect(() => {
     if (!settings.autoSync || autoRanRef.current.sync || activeRef.current) return;
-    if (activeConnections.length === 0) return;
+    if (activeConnections.length === 0 && !isNoAuth) return;
     const last = settings.lastSyncAt ? new Date(settings.lastSyncAt).getTime() : 0;
     if (Date.now() - last < AUTO_SYNC_COOLDOWN_MS) return;
     autoRanRef.current.sync = true;
     startSync();
-  }, [settings.autoSync, settings.lastSyncAt, activeConnections.length, startSync]);
+  }, [settings.autoSync, settings.lastSyncAt, activeConnections.length, isNoAuth, startSync]);
 
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-border bg-sidebar/30 px-3 py-2.5 mb-3">

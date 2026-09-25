@@ -1,5 +1,5 @@
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import PropTypes from "prop-types";
 import { Button } from "@/shared/components";
 function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias, onTest, testStatus, isTesting }) {
@@ -73,12 +73,15 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
   const [newModel, setNewModel] = useState("");
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [testingModelId, setTestingModelId] = useState(null);
+  const [testingModelIds, setTestingModelIds] = useState([]);
+  const inflightTestRef = useRef(null);
+  if (inflightTestRef.current === null) inflightTestRef.current = new Set();
   const [modelTestResults, setModelTestResults] = useState({});
 
   const handleTestModel = async (modelId) => {
-    if (testingModelId) return;
-    setTestingModelId(modelId);
+    if (inflightTestRef.current.has(modelId)) return;
+    inflightTestRef.current.add(modelId);
+    setTestingModelIds((prev) => (prev.includes(modelId) ? prev : [...prev, modelId]));
     try {
       const res = await fetch("/api/models/test", {
         method: "POST",
@@ -90,7 +93,8 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
     } catch {
       setModelTestResults((prev) => ({ ...prev, [modelId]: "error" }));
     } finally {
-      setTestingModelId(null);
+      inflightTestRef.current.delete(modelId);
+      setTestingModelIds((prev) => prev.filter((id) => id !== modelId));
     }
   };
 
@@ -224,7 +228,7 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
               onDeleteAlias={() => onDeleteAlias(alias)}
               onTest={connections.length > 0 ? () => handleTestModel(modelId) : undefined}
               testStatus={modelTestResults[modelId]}
-              isTesting={testingModelId === modelId}
+              isTesting={testingModelIds.includes(modelId)}
             />
           ))}
         </div>
