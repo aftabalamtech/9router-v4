@@ -14,7 +14,7 @@
     "backend": "npm run dev --workspace=9router-backend",
     "frontend": "npm run dev --workspace=9router-frontend",
     "start": "npm run start --workspace=9router-backend",
-    "test": "node --test \"backend/test/*.test.js\" \"frontend/test/*.test.js\"",
+    "test": "node --test backend/test/*.test.js frontend/test/*.test.js",
     "heroku-postbuild": "npm run build",
     "typecheck": "npm run typecheck --workspace=9router-backend && npm run typecheck --workspace=9router-frontend"
   },

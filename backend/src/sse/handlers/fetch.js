@@ -3,8 +3,8 @@ import {
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
-  isValidApiKey,
 } from "../services/auth.js";
+import { authorizeClientRequest } from "../services/clientAccess.js";
 import { getSettings, getCombos } from "../../lib/localDb.js";
 import { AI_PROVIDERS, resolveProviderId } from "../../shared/constants/providers.js";
 import { handleFetchCore } from "open-sse/handlers/fetch/index.js";
@@ -46,18 +46,13 @@ export async function handleFetch(request) {
     log.debug("AUTH", "No API key provided (local mode)");
   }
 
-  // Enforce API key if enabled in settings
+  // Enforce API key if enabled in settings. Dashboard requests authenticate
+  // with the session cookie instead of a key.
   const settings = await getSettings();
-  if (settings.requireApiKey) {
-    if (!apiKey) {
-      log.warn("AUTH", "Missing API key (requireApiKey=true)");
-      return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
-    }
-    const valid = await isValidApiKey(apiKey);
-    if (!valid) {
-      log.warn("AUTH", "Invalid API key (requireApiKey=true)");
-      return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
-    }
+  const access = await authorizeClientRequest(request, apiKey, settings);
+  if (!access.allowed) {
+    log.warn("AUTH", `${access.message} (requireApiKey=true)`);
+    return errorResponse(HTTP_STATUS.UNAUTHORIZED, access.message);
   }
 
   if (!providerInput || typeof providerInput !== "string") {

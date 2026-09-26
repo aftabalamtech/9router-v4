@@ -1,7 +1,8 @@
 import {
-  extractApiKey, isValidApiKey,
+  extractApiKey,
   getProviderCredentials, markAccountUnavailable,
 } from "../services/auth.js";
+import { authorizeClientRequest } from "../services/clientAccess.js";
 import { getSettings } from "../../lib/localDb.js";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleTtsCore } from "open-sse/handlers/ttsCore.js";
@@ -34,10 +35,8 @@ export async function handleTts(request) {
 
   const settings = await getSettings();
   if (settings.requireApiKey) {
-    const apiKey = extractApiKey(request);
-    if (!apiKey) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
-    const valid = await isValidApiKey(apiKey);
-    if (!valid) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
+    const access = await authorizeClientRequest(request, extractApiKey(request), settings);
+    if (!access.allowed) return errorResponse(HTTP_STATUS.UNAUTHORIZED, access.message);
   }
 
   if (!modelStr) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");

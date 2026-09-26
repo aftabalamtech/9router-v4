@@ -5,8 +5,8 @@ import {
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
-  isValidApiKey,
 } from "../services/auth.js";
+import { authorizeClientRequest } from "../services/clientAccess.js";
 import { cacheClaudeHeaders } from "open-sse/utils/claudeHeaderCache.js";
 import { getSettings } from "../../lib/localDb.js";
 import { getModelInfo, getComboModels } from "../services/model.js";
@@ -67,18 +67,16 @@ export async function handleChat(request, clientRawRequest = null) {
     log.debug("AUTH", "No API key provided (local mode)");
   }
 
-  // Enforce API key if enabled in settings
+  // Enforce API key if enabled in settings. First-party dashboard surfaces
+  // (Playground) authenticate with the dashboard session cookie instead.
   const settings = await getSettings();
-  if (settings.requireApiKey) {
-    if (!apiKey) {
-      log.warn("AUTH", "Missing API key (requireApiKey=true)");
-      return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
-    }
-    const valid = await isValidApiKey(apiKey);
-    if (!valid) {
-      log.warn("AUTH", "Invalid API key (requireApiKey=true)");
-      return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
-    }
+  const access = await authorizeClientRequest(request, apiKey, settings);
+  if (!access.allowed) {
+    log.warn("AUTH", `${access.message} (requireApiKey=true)`);
+    return errorResponse(HTTP_STATUS.UNAUTHORIZED, access.message);
+  }
+  if (access.via === "dashboard-session") {
+    log.debug("AUTH", "Authorized by dashboard session");
   }
 
   if (!modelStr) {

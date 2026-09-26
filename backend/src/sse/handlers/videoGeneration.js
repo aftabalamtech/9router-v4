@@ -3,8 +3,8 @@ import {
   markAccountUnavailable,
   clearAccountError,
   extractApiKey,
-  isValidApiKey,
 } from "../services/auth.js";
+import { authorizeClientRequest } from "../services/clientAccess.js";
 import { getSettings } from "../../lib/localDb.js";
 import { getModelInfo } from "../services/model.js";
 import { handleVideoGenerationCore } from "open-sse/handlers/videoGenerationCore.js";
@@ -32,9 +32,8 @@ export async function handleVideoGeneration(request) {
   const apiKey = extractApiKey(request);
   const settings = await getSettings();
   if (settings.requireApiKey) {
-    if (!apiKey) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
-    const valid = await isValidApiKey(apiKey);
-    if (!valid) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Invalid API key");
+    const access = await authorizeClientRequest(request, apiKey, settings);
+    if (!access.allowed) return errorResponse(HTTP_STATUS.UNAUTHORIZED, access.message);
   }
 
   if (!modelStr) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
