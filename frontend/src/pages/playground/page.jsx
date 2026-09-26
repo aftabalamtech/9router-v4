@@ -37,6 +37,16 @@ function readAssistantText(chunk) {
   return pieces[0] || "";
 }
 
+// Surface provider/upstream errors that arrive inside a 200 SSE stream as
+// `data: {"error": ...}` frames, instead of silently rendering nothing.
+function readStreamErrorText(payload) {
+  if (!payload || typeof payload !== "object") return "";
+  const err = payload.error;
+  if (!err) return "";
+  if (typeof err === "string") return err;
+  return textValue(err.message || err);
+}
+
 function createId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `pg_${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -493,17 +503,32 @@ export default function PlaygroundPage() {
           const payload = trimmed.slice(5).trim();
           if (!payload || payload === "[DONE]") continue;
           try {
-            const text = readAssistantText(JSON.parse(payload));
+            const chunk = JSON.parse(payload);
+            const streamErr = readStreamErrorText(chunk);
+            if (streamErr) throw new Error(streamErr);
+            const text = readAssistantText(chunk);
             if (!text) continue;
             acc += text;
             const snapshot = acc;
             setMessages((prev) => prev.map((m) => (m.id === assistantMsg.id ? { ...m, content: snapshot } : m)));
-          } catch {
+          } catch (parseErr) {
+            // Provider errors thrown above must surface to the user;
+            // malformed chunks are ignored.
+            if (parseErr instanceof Error && parseErr.message &&
+                !/unexpected token|json/i.test(parseErr.message)) {
+              throw parseErr;
+            }
             // Ignore malformed chunks.
           }
         }
       }
-      if (!acc) throw new Error("Provider returned an empty response.");
+      if (!acc) {
+        throw new Error(
+          "Provider returned an empty response. The model produced no text " +
+          "(possible causes: upstream refusal, quota exhaustion, or an " +
+          "unsupported model id — check the model's Test status)."
+        );
+      }
       setMessages((prev) => prev.map((m) => (m.id === assistantMsg.id ? { ...m, content: acc, status: "done" } : m)));
     } catch (e) {
       if (e?.name === "AbortError") {

@@ -125,7 +125,7 @@ function createOpenAIResponse(model, text = DEFAULT_BYPASS_TEXT) {
  * Create non-streaming response with translation
  * Use translator to convert OpenAI → sourceFormat
  */
-function createNonStreamingResponse(sourceFormat, model, text) {
+async function createNonStreamingResponse(sourceFormat, model, text) {
   const openaiResponse = createOpenAIResponse(model, text);
 
   // If sourceFormat is OpenAI, return directly
@@ -149,14 +149,14 @@ function createNonStreamingResponse(sourceFormat, model, text) {
   const allTranslated = [];
 
   for (const chunk of openaiChunks) {
-    const translated = translateResponse(FORMATS.OPENAI, sourceFormat, chunk, state);
+    const translated = await translateResponse(FORMATS.OPENAI, sourceFormat, chunk, state);
     if (translated?.length > 0) {
       allTranslated.push(...translated);
     }
   }
 
   // Flush remaining
-  const flushed = translateResponse(FORMATS.OPENAI, sourceFormat, null, state);
+  const flushed = await translateResponse(FORMATS.OPENAI, sourceFormat, null, state);
   if (flushed?.length > 0) {
     allTranslated.push(...flushed);
   }
@@ -179,7 +179,7 @@ function createNonStreamingResponse(sourceFormat, model, text) {
  * Create streaming response with translation
  * Use translator to convert OpenAI chunks → sourceFormat
  */
-function createStreamingResponse(sourceFormat, model, text) {
+async function createStreamingResponse(sourceFormat, model, text) {
   const openaiResponse = createOpenAIResponse(model, text);
   const state = initState(sourceFormat);
   state.model = model;
@@ -191,7 +191,7 @@ function createStreamingResponse(sourceFormat, model, text) {
   const translatedChunks = [];
 
   for (const chunk of openaiChunks) {
-    const translated = translateResponse(FORMATS.OPENAI, sourceFormat, chunk, state);
+    const translated = await translateResponse(FORMATS.OPENAI, sourceFormat, chunk, state);
     if (translated?.length > 0) {
       for (const item of translated) {
         translatedChunks.push(formatSSE(item, sourceFormat));
@@ -200,7 +200,7 @@ function createStreamingResponse(sourceFormat, model, text) {
   }
 
   // Flush remaining events
-  const flushed = translateResponse(FORMATS.OPENAI, sourceFormat, null, state);
+  const flushed = await translateResponse(FORMATS.OPENAI, sourceFormat, null, state);
   if (flushed?.length > 0) {
     for (const item of flushed) {
       translatedChunks.push(formatSSE(item, sourceFormat));

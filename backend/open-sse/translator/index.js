@@ -10,11 +10,9 @@ import { AntigravityExecutor } from "../executors/antigravity.js";
 const requestRegistry = new Map();
 const responseRegistry = new Map();
 
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-
 // Track initialization state
 let initialized = false;
+let initPromise = null;
 
 // Register translator
 export function register(from, to, requestFn, responseFn) {
@@ -27,34 +25,52 @@ export function register(from, to, requestFn, responseFn) {
   }
 }
 
-// Lazy load translators (called once on first use)
-function ensureInitialized() {
+// Lazy load translators (called once on first use).
+//
+// IMPORTANT: these MUST be dynamic import(), not require(). The translator
+// files are ESM; requiring them makes Node/tsx compile a second CJS instance
+// of this very module, so their register() calls land in the CJS copy's
+// registry while translateRequest/translateResponse read THIS (ESM) registry.
+// Result: every translator silently missing → Antigravity/Gemini/Claude
+// streaming chunks passed through untranslated (clients saw empty responses).
+// Dynamic import() keeps a single module instance so the registry is shared.
+async function ensureInitialized() {
   if (initialized) return;
-  initialized = true;
+  if (initPromise) return initPromise;
+  initPromise = (async () => {
+    // Request translators
+    await import("./request/claude-to-openai.js");
+    await import("./request/openai-to-claude.js");
+    await import("./request/gemini-to-openai.js");
+    await import("./request/openai-to-gemini.js");
+    await import("./request/openai-to-vertex.js");
+    await import("./request/antigravity-to-openai.js");
+    await import("./request/openai-responses.js");
+    await import("./request/openai-to-kiro.js");
+    await import("./request/openai-to-cursor.js");
+    await import("./request/openai-to-ollama.js");
+    await import("./request/openai-to-commandcode.js");
 
-  // Request translators - sync require pattern for bundler
-  require("./request/claude-to-openai.js");
-  require("./request/openai-to-claude.js");
-  require("./request/gemini-to-openai.js");
-  require("./request/openai-to-gemini.js");
-  require("./request/openai-to-vertex.js");
-  require("./request/antigravity-to-openai.js");
-  require("./request/openai-responses.js");
-  require("./request/openai-to-kiro.js");
-  require("./request/openai-to-cursor.js");
-  require("./request/openai-to-ollama.js");
-  require("./request/openai-to-commandcode.js");
+    // Response translators
+    await import("./response/claude-to-openai.js");
+    await import("./response/openai-to-claude.js");
+    await import("./response/gemini-to-openai.js");
+    await import("./response/openai-to-antigravity.js");
+    await import("./response/openai-responses.js");
+    await import("./response/kiro-to-openai.js");
+    await import("./response/cursor-to-openai.js");
+    await import("./response/ollama-to-openai.js");
+    await import("./response/commandcode-to-openai.js");
 
-  // Response translators
-  require("./response/claude-to-openai.js");
-  require("./response/openai-to-claude.js");
-  require("./response/gemini-to-openai.js");
-  require("./response/openai-to-antigravity.js");
-  require("./response/openai-responses.js");
-  require("./response/kiro-to-openai.js");
-  require("./response/cursor-to-openai.js");
-  require("./response/ollama-to-openai.js");
-  require("./response/commandcode-to-openai.js");
+    initialized = true;
+  })();
+  try {
+    await initPromise;
+  } catch (err) {
+    // Allow a later retry if a translator file failed to load
+    initPromise = null;
+    throw err;
+  }
 }
 
 // Strip specific content types from messages (explicit opt-in via strip[] in PROVIDER_MODELS)
@@ -75,8 +91,8 @@ function stripContentTypes(body, stripList = []) {
 }
 
 // Translate request: source -> openai -> target
-export function translateRequest(sourceFormat, targetFormat, model, body, stream = true, credentials = null, provider = null, reqLogger = null, stripList = [], connectionId = null, clientTool = null) {
-  ensureInitialized();
+export async function translateRequest(sourceFormat, targetFormat, model, body, stream = true, credentials = null, provider = null, reqLogger = null, stripList = [], connectionId = null, clientTool = null) {
+  await ensureInitialized();
   let result = body;
 
   // Strip explicit content types (opt-in via strip[] in PROVIDER_MODELS entry)
@@ -150,8 +166,8 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
 }
 
 // Translate response chunk: target -> openai -> source
-export function translateResponse(targetFormat, sourceFormat, chunk, state) {
-  ensureInitialized();
+export async function translateResponse(targetFormat, sourceFormat, chunk, state) {
+  await ensureInitialized();
   // If same format, return as-is
   if (sourceFormat === targetFormat) {
     return [chunk];

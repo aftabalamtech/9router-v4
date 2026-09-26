@@ -33,7 +33,7 @@ export async function POST_handler(req, res) {
         const stream = clientBody.stream !== false;
 
         // translateRequest(source, OPENAI) = only the first half
-        const result = translateRequest(sourceFormat, FORMATS.OPENAI, model, clientBody, stream, null, provider);
+        const result = await translateRequest(sourceFormat, FORMATS.OPENAI, model, clientBody, stream, null, provider);
         delete result._toolNameMap;
 
         return res.json({ success: true, result: { body: result } });
@@ -53,7 +53,7 @@ export async function POST_handler(req, res) {
         const stream = openaiBody.stream !== false;
 
         // translateRequest(OPENAI, target) = second half of pipeline
-        const translated = translateRequest(FORMATS.OPENAI, targetFormat, model, openaiBody, stream, null, provider);
+        const translated = await translateRequest(FORMATS.OPENAI, targetFormat, model, openaiBody, stream, null, provider);
         delete translated._toolNameMap;
 
         // Build URL + headers via executor (same as chatCore → executor.execute)
