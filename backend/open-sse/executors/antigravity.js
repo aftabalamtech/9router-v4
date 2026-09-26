@@ -21,6 +21,9 @@ const MAX_ANTIGRAVITY_OUTPUT_TOKENS = 16384;
 export class AntigravityExecutor extends BaseExecutor {
   constructor() {
     super("antigravity", PROVIDERS.antigravity);
+    // Test seam: when set, used instead of proxyAwareFetch so unit tests can
+    // simulate upstream responses without network access.
+    this._fetchImpl = null;
   }
 
   buildUrl(model, stream, urlIndex = 0) {
@@ -136,7 +139,8 @@ export class AntigravityExecutor extends BaseExecutor {
     if (!credentials.refreshToken) return null;
 
     try {
-      const response = await proxyAwareFetch(OAUTH_ENDPOINTS.google.token, {
+      const doFetch = this._fetchImpl || proxyAwareFetch;
+      const response = await doFetch(OAUTH_ENDPOINTS.google.token, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json" },
         body: new URLSearchParams({
@@ -147,7 +151,14 @@ export class AntigravityExecutor extends BaseExecutor {
         })
       }, proxyOptions);
 
-      if (!response.ok) return null;
+      if (!response.ok) {
+        // Include the OAuth error code (e.g. invalid_grant) without any token material
+        const errText = await response.text().catch(() => "");
+        let oauthCode = `HTTP ${response.status}`;
+        try { oauthCode = JSON.parse(errText).error || oauthCode; } catch {}
+        log?.error?.("TOKEN", `Antigravity refresh failed: ${oauthCode} — reconnect the account`);
+        return null;
+      }
 
       const tokens = await response.json();
       log?.info?.("TOKEN", "Antigravity refreshed");
@@ -221,11 +232,34 @@ export class AntigravityExecutor extends BaseExecutor {
     return totalMs > 0 ? totalMs : null;
   }
 
+  // Map known upstream Google error statuses to an actionable explanation.
+  // Never includes tokens or account identifiers — messages come from the
+  // upstream response body only.
+  explainUpstreamStatus(status, message) {
+    const msg = typeof message === "string" ? message.toLowerCase() : "";
+    if (status === HTTP_STATUS.FORBIDDEN && (msg.includes("validation_required") || msg.includes("verify your account"))) {
+      return "Google requires this account to complete identity verification before it can use Antigravity. "
+        + "Open the verification URL printed in the upstream error in a browser, sign in with this account, "
+        + "and retry. A proxy will not resolve this.";
+    }
+    if (status === HTTP_STATUS.FORBIDDEN && msg.includes("permission_denied")) {
+      return "Google denied model inference for this account (PERMISSION_DENIED). An active OAuth connection "
+        + "does not imply inference authorization — check the account's Antigravity eligibility/tier.";
+    }
+    if (status === HTTP_STATUS.UNAUTHORIZED) {
+      return "Access token rejected by Google (401). The stored token may be expired or revoked; "
+        + "reconnect the Antigravity account or allow a token refresh.";
+    }
+    return null;
+  }
+
   parseError(response, bodyText) {
     let message = bodyText;
+    let upstreamCode = null;
     try {
       const json = JSON.parse(bodyText);
       message = json.error?.message || json.message || json.error || bodyText;
+      upstreamCode = json.error?.status || json.error?.code || null;
     } catch {}
 
     const messageStr = typeof message === "string" ? message : JSON.stringify(message);
@@ -239,7 +273,12 @@ export class AntigravityExecutor extends BaseExecutor {
       };
     }
 
-    return { status: response.status, message: messageStr };
+    const explanation = this.explainUpstreamStatus(response.status, messageStr);
+    const suffix = upstreamCode && !messageStr.includes(String(upstreamCode)) ? ` [upstream: ${upstreamCode}]` : "";
+    return {
+      status: response.status,
+      message: explanation ? `${messageStr}${suffix} — ${explanation}` : `${messageStr}${suffix}`
+    };
   }
 
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
@@ -266,31 +305,23 @@ export class AntigravityExecutor extends BaseExecutor {
       }
 
       try {
-        const response = await proxyAwareFetch(url, {
+        const doFetch = this._fetchImpl || proxyAwareFetch;
+        const response = await doFetch(url, {
           method: "POST",
           headers,
           body: JSON.stringify(transformedBody),
           signal
         }, proxyOptions);
 
-        const isForbiddenQuota = response.status === HTTP_STATUS.FORBIDDEN;
-        const isRateLimited = response.status === HTTP_STATUS.RATE_LIMITED;
-
-        if (isRateLimited || isForbiddenQuota) {
-          const bodyText = await response.text();
+        if (!response.ok) {
+          const bodyText = await response.text().catch(() => "");
           const errorInfo = this.parseError(response, bodyText);
-          
-          // Return immediately to allow account rotation in the outer loop (chat.js)
-          return {
-            status: errorInfo.status,
-            message: errorInfo.message,
-            resetsAtMs: errorInfo.resetsAtMs
-          };
-        }
+          const status = errorInfo.status || response.status;
+          lastStatus = status;
+          lastError = errorInfo.message;
+          log?.warn?.("UPSTREAM", `ANTIGRAVITY ${status} on ${url}: ${errorInfo.message?.slice(0, 200)}`);
 
-        if (response.status === HTTP_STATUS.SERVICE_UNAVAILABLE) {
-          // Internal retry only for 503 Service Unavailable
-          if (retryAttemptsByUrl[urlIndex] < MAX_AUTO_RETRIES) {
+          if (status === HTTP_STATUS.SERVICE_UNAVAILABLE && retryAttemptsByUrl[urlIndex] < MAX_AUTO_RETRIES) {
             retryAttemptsByUrl[urlIndex]++;
             const delay = 2000 * Math.pow(2, retryAttemptsByUrl[urlIndex] - 1);
             log?.warn?.("RETRY", `503 auto retry ${retryAttemptsByUrl[urlIndex]}/${MAX_AUTO_RETRIES} after ${delay/1000}s`);
@@ -298,12 +329,25 @@ export class AntigravityExecutor extends BaseExecutor {
             urlIndex--; // Retry same URL
             continue;
           }
-        }
-
-        if (!response.ok) {
-          lastStatus = response.status;
-          lastError = await response.text();
           if (urlIndex + 1 < fallbackCount) continue;
+
+          // IMPORTANT: always honour the executor contract — return a real
+          // Response so the shared chatCore error path can read .status and
+          // surface the upstream reason. Returning a bare { status, message }
+          // object here used to crash chatCore with
+          // "Cannot read properties of undefined (reading 'status')".
+          // The original upstream body is preserved so parseUpstreamError →
+          // executor.parseError can extract resetsAtMs and the explanation.
+          return {
+            response: new Response(bodyText || JSON.stringify({ error: { message: errorInfo.message } }), {
+              status,
+              statusText: response.statusText || "",
+              headers: { "Content-Type": "application/json" }
+            }),
+            url,
+            headers,
+            transformedBody
+          };
         }
 
         return { response, url, headers, transformedBody };

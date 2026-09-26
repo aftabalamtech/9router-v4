@@ -59,6 +59,10 @@ const COOLDOWN = {
  */
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
+  // Google account-level access restrictions: retrying/falling back cannot fix
+  // these — the account itself must be verified/re-authorized by the user.
+  { text: "validation_required",        cooldownMs: COOLDOWN.exhausted },
+  { text: "verify your account",        cooldownMs: COOLDOWN.exhausted },
   { text: "exhausted",                cooldownMs: COOLDOWN.exhausted },
   { text: "insufficient credits",     cooldownMs: COOLDOWN.exhausted },
   { text: "1076",                     cooldownMs: COOLDOWN.exhausted },
