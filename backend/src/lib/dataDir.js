@@ -19,7 +19,15 @@ export function getDataDir() {
     return configured;
   } catch (e) {
     if (e?.code === "EACCES" || e?.code === "EPERM") {
-      console.warn(`[DATA_DIR] '${configured}' not writable → fallback ~/.${APP_NAME}`);
+      // Actionable, honest warning: with DATABASE_URL set the app's data lives
+      // in PostgreSQL and nothing is lost; on SQLite this fallback directory
+      // is EPHEMERAL on PaaS containers (data is wiped on redeploy).
+      console.warn(
+        `[DATA_DIR] '${configured}' is not writable → falling back to ~/.${APP_NAME}. ` +
+        (process.env.DATABASE_URL
+          ? `DATABASE_URL is set, so application data is stored in PostgreSQL and is NOT affected. `
+          : `WARNING: no DATABASE_URL set — SQLite data in this fallback directory will NOT survive container redeploys; attach a persistent disk at '${configured}' or unset DATA_DIR. `)
+      );
       return defaultDir();
     }
     throw e;

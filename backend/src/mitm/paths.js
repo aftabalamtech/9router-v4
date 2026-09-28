@@ -19,7 +19,12 @@ function getDataDir() {
     return configured;
   } catch (e) {
     if (e?.code === "EACCES" || e?.code === "EPERM") {
-      console.warn(`[DATA_DIR] '${configured}' not writable → fallback ~/.${APP_NAME}`);
+      console.warn(
+        `[DATA_DIR] '${configured}' is not writable → falling back to ~/.${APP_NAME}. ` +
+        (process.env.DATABASE_URL
+          ? `DATABASE_URL is set, so application data is stored in PostgreSQL and is NOT affected.`
+          : `WARNING: without DATABASE_URL, SQLite data here will NOT survive container redeploys.`)
+      );
       return defaultDir();
     }
     throw e;
