@@ -3,6 +3,7 @@ import { Button, Card, Input, Spinner } from "@/shared/components";
 import { getModelsByProviderId } from "@/shared/constants/models";
 import { AI_PROVIDERS, FREE_PROVIDERS, getProviderAlias } from "@/shared/constants/providers";
 import { isModelBlocked, isModelHidden } from "@/shared/utils/modelEligibility";
+import { getProviderDisplayName, buildNodeNameMap } from "@/shared/utils/providerNaming";
 
 function textValue(value) {
   if (typeof value === "string") return value;
@@ -152,7 +153,10 @@ export default function PlaygroundPage() {
   const [modelMode, setModelMode] = useState("select"); // "select" | "custom"
   const [customModelId, setCustomModelId] = useState("");
   const [workingOnly, setWorkingOnly] = useState(false);
-  const [workingList, setWorkingList] = useState(null); // canonical GET /api/models/working or null
+  const [workingList, setWorkingList] = useState(null);
+  // providerId → configured custom-provider name, captured by the load effect so
+  // derived option labels can resolve "Xkiro" outside of that closure.
+  const nodeNamesRef = useRef({});
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -190,13 +194,31 @@ export default function PlaygroundPage() {
           }
         }
 
+        // Custom-provider node names. /api/providers now returns
+        // `providerName` (the configured node name) on every connection, and
+        // the node list is fetched as a fallback, so the provider selector and
+        // the "All providers" list show "Xkiro" instead of the node id.
+        let nodeNames = {};
+        try {
+          const nodeRes = await fetch("/api/provider-nodes", { cache: "no-store" });
+          if (nodeRes.ok) {
+            const nodes = (await nodeRes.json().catch(() => ({}))).nodes;
+            if (cancelled) return;
+            nodeNames = buildNodeNameMap(nodes);
+          }
+        } catch { /* names are cosmetic; fall back to the generic label */ }
+        for (const c of connections) {
+          if (c?.providerName && !nodeNames[c.provider]) nodeNames[c.provider] = c.providerName;
+        }
+        nodeNamesRef.current = nodeNames;
+
         const groups = new Map();
         const ensureGroup = (id) => {
           if (!groups.has(id)) {
             const def = AI_PROVIDERS[id] || {};
             groups.set(id, {
               id,
-              name: def.name || id,
+              name: getProviderDisplayName(id, { nodeNames }),
               noAuth: !!def.noAuth,
               models: new Map(),
             });
@@ -375,12 +397,12 @@ export default function PlaygroundPage() {
       return scope.map((w) => ({
         value: w.fullModel,
         label: providerId === ALL_PROVIDERS
-          ? `${w.name} (${AI_PROVIDERS[w.provider]?.name || w.provider})`
+          ? `${w.name} (${getProviderDisplayName(w.provider, { nodeNames: nodeNamesRef.current })})`
           : w.name,
         sub: w.fullModel,
         request: w.fullModel,
         providerId: w.provider,
-        providerName: AI_PROVIDERS[w.provider]?.name || w.provider,
+        providerName: getProviderDisplayName(w.provider, { nodeNames: nodeNamesRef.current }),
       })).sort((a, b) => a.label.localeCompare(b.label));
     }
     const scope = workingOnly

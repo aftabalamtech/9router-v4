@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { authMiddleware } from "./middleware/auth.js";
 import { buildAutoRouter } from "./autoRouter.js";
+import { getDbDiagnostics } from "./lib/db/diagnostics.js";
 
 const PORT = Number(process.env.PORT) || 3001;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5177";
@@ -33,8 +34,24 @@ app.use(express.json({ limit: "128mb" }));
 app.use(express.urlencoded({ extended: true, limit: "128mb" }));
 
 // ─── Health Check (no auth) ────────────────────────────────────────────────────
-app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", version: "3.0.0", ts: Date.now() });
+// Includes NON-SENSITIVE database diagnostics: active engine, connection
+// status, schema/migration version and whether required tables exist. Never
+// exposes URLs, hosts, credentials or row data — safe for orchestrator probes.
+let dbDiagnosticsPromise: Promise<Record<string, unknown>> | null = null;
+app.get("/api/health", async (_req, res) => {
+  let database: Record<string, unknown> | undefined;
+  try {
+    // Cache for 15s so frequent orchestrator probes don't hammer the DB.
+    if (!dbDiagnosticsPromise) {
+      dbDiagnosticsPromise = getDbDiagnostics().finally(() => {
+        setTimeout(() => { dbDiagnosticsPromise = null; }, 15_000);
+      });
+    }
+    database = (await dbDiagnosticsPromise) as Record<string, unknown>;
+  } catch {
+    database = undefined;
+  }
+  res.json({ status: "ok", version: "3.0.0", ts: Date.now(), ...(database ? { database } : {}) });
 });
 
 // ─── Auth Middleware ───────────────────────────────────────────────────────────

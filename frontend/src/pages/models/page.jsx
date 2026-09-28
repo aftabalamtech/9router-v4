@@ -4,6 +4,7 @@ import { getModelsByProviderId } from "@/shared/constants/models";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { ConfirmModal, Modal } from "@/shared/components";
 import { isModelBlocked, isModelHidden, matchesStatusFilter } from "@/shared/utils/modelEligibility";
+import { modelPrimaryLabel, hasDistinctDisplayName } from "@/shared/utils/modelDisplay";
 import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
 import ModelBatchTest from "../providers/components/ModelBatchTest";
 
@@ -264,13 +265,22 @@ export default function ModelsPage() {
     }
     // Alias-added models (provider "Add Model" stores aliases like openrouter/deepseek/...).
     // These are NOT in /api/models/custom, so derive them here per provider.
-    const aliasEntries = [];
+      const aliasEntries = [];
+    const aliasOwner = new Map(); // fullModel → alias name (first wins)
+    const aliasNameOwner = new Map(); // alias name → fullModel (first wins)
     for (const [aliasName, fullModel] of Object.entries(modelAliases)) {
       if (typeof fullModel !== "string" || !fullModel.includes("/")) continue;
       const slash = fullModel.indexOf("/");
       const storageAlias = fullModel.slice(0, slash);
       const modelId = fullModel.slice(slash + 1);
       if (!modelId) continue;
+      // Cross-provider alias collision: two providers may legitimately expose
+      // the same short alias (e.g. both "qwen3.5-plus"). The FIRST alias
+      // record keeps the name; later ones get a provider-scoped unique name so
+      // selecting the short label never routes to the wrong provider.
+      const aliasKey = aliasNameOwner.has(aliasName) ? `${storageAlias}/${aliasName}` : aliasName;
+      aliasNameOwner.set(aliasKey, fullModel);
+      if (!aliasOwner.has(fullModel)) aliasOwner.set(fullModel, aliasKey);
       if (hardcodedByAlias[storageAlias]?.has(modelId)) continue;
       // Also skip anything already covered by the static list or the synced
       // catalog so the same model never appears twice under one provider.
@@ -288,7 +298,7 @@ export default function ModelsPage() {
         providerAlias: storageAlias,
         id: modelId,
         fullModel,
-        name: aliasName,
+        name: aliasKey,
         kind: "llm",
         isFree: /free/i.test(modelId),
         isCustom: true,
@@ -575,17 +585,29 @@ export default function ModelsPage() {
         {paged.map((entry) => {
           const status = entry.testStatus;
           const testing = testingIds.includes(entry.key) || singleTestingIds.includes(entry.key);
+          // Primary label = the actual upstream model id (or a custom display
+          // name). The full provider-prefixed identity stays one click away
+          // via the tooltip and the copy button — never truncated away.
+          const primaryLabel = modelPrimaryLabel(entry);
+          const secondaryName = hasDistinctDisplayName(entry.name, { id: entry.id, fullModel: entry.fullModel })
+            ? entry.name
+            : "";
           return (
             <div key={entry.key} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border bg-card ${entry.disabled ? "border-amber-500/40 opacity-80" : status === "ok" ? "border-green-500/40" : status === "error" ? "border-red-500/40" : "border-border"}`}>
               <span className="material-symbols-outlined text-lg shrink-0" style={status === "ok" ? { color: "#22c55e" } : status === "error" ? { color: "#ef4444" } : undefined}>smart_toy</span>
               <div className="flex flex-col gap-1 min-w-0 flex-1">
-                <code className="text-xs text-text-muted font-mono truncate">{entry.fullModel}</code>
+                <span
+                  className="text-xs text-text-muted font-mono truncate"
+                  title={`${entry.fullModel}${secondaryName && secondaryName !== primaryLabel ? ` — ${secondaryName}` : ""}`}
+                >
+                  {primaryLabel}
+                </span>
                 <div className="flex items-center gap-1.5">
                   <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-sidebar text-text-muted">{entry.isCustom ? "CUSTOM" : "BUILT-IN"}</span>
                   {entry.isFree && <span className="text-[9px] font-bold text-green-500 bg-green-500/10 px-1.5 py-0.5 rounded">FREE</span>}
                   {entry.disabled && <span className="text-[9px] font-bold text-amber-500 bg-amber-500/10 px-1.5 py-0.5 rounded">DISABLED</span>}
                   {entry.hidden && !entry.disabled && <span className="text-[9px] font-bold text-text-muted bg-sidebar px-1.5 py-0.5 rounded">HIDDEN</span>}
-                  {entry.name && <span className="text-[10px] text-text-muted/70 italic truncate">{entry.name}</span>}
+                  {secondaryName && <span className="text-[10px] text-text-muted/70 italic truncate">{secondaryName}</span>}
                   {status === "ok" && <span className="material-symbols-outlined text-sm" style={{ color: "#22c55e" }}>check_circle</span>}
                   {status === "error" && <span className="material-symbols-outlined text-sm" style={{ color: "#ef4444" }}>cancel</span>}
                 </div>
@@ -605,7 +627,11 @@ export default function ModelsPage() {
                   <span className="material-symbols-outlined text-base">block</span>
                 </button>
               )}
-              <button onClick={() => copy(entry.fullModel, `avail-${entry.key}`)} title="Copy" className="p-1 rounded text-text-muted hover:text-primary hover:bg-sidebar">
+              <button
+                onClick={() => copy(entry.fullModel, `avail-${entry.key}`)}
+                title={`Copy full id: ${entry.fullModel}`}
+                className="p-1 rounded text-text-muted hover:text-primary hover:bg-sidebar"
+              >
                 <span className="material-symbols-outlined text-base">{copied === `avail-${entry.key}` ? "check" : "content_copy"}</span>
               </button>
               <button onClick={() => setCompatEntry(entry)} title="Compatibility" className="flex items-center gap-1 px-2 py-1 rounded-lg border border-border text-[11px] text-text-muted hover:text-primary hover:border-primary/40 whitespace-nowrap">

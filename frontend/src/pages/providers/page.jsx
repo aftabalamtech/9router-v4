@@ -24,6 +24,7 @@ import { Link } from 'react-router-dom';
 import { getErrorCode, getRelativeTime } from "@/shared/utils";
 import { useNotificationStore } from "@/store/notificationStore";
 import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
+import { getProviderDisplayName } from "@/shared/utils/providerNaming";
 import useConnectionEvents from "@/shared/hooks/useConnectionEvents";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import ModelAvailabilityBadge from "./components/ModelAvailabilityBadge";
@@ -290,11 +291,15 @@ export default function ProvidersPage() {
     }
   };
 
+  // Custom providers are node-backed and dynamic, so their display name comes
+  // from the node record (e.g. "Xkiro"), never from the generic type label or
+  // the opaque `openai-compatible-chat-<uuid>` id. getProviderDisplayName owns
+  // that resolution for the whole app.
   const compatibleProviders = providerNodes
     .filter((node) => node.type === "openai-compatible")
     .map((node) => ({
       id: node.id,
-      name: node.name || "OpenAI Compatible",
+      name: getProviderDisplayName(node.id, { node }),
       color: "#10A37F",
       textIcon: "OC",
       apiType: node.apiType,
@@ -305,7 +310,7 @@ export default function ProvidersPage() {
     .filter((node) => node.type === "anthropic-compatible")
     .map((node) => ({
       id: node.id,
-      name: node.name || "Anthropic Compatible",
+      name: getProviderDisplayName(node.id, { node }),
       color: "#D97757",
       textIcon: "AC",
     }))
@@ -1135,7 +1140,7 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder="Leave empty for unauthenticated upstreams"
-              hint="Stored encrypted-at-rest; only needed if the upstream requires auth."
+              hint="Only needed if the upstream requires auth. Kept server-side — it is never sent back to the browser."
             />
 
             {/* Advanced settings — the prefix and endpoint type most users can leave alone. */}

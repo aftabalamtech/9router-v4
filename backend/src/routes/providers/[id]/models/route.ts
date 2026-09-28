@@ -7,12 +7,40 @@ import { resolveOllamaLocalHost } from "../../../../../open-sse/config/providers
 import { resolveKiroModels } from "../../../../../open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "../../../../../open-sse/services/qoderModels.js";
 import { fetchWithTimeout } from "../../../../lib/net/fetchWithTimeout.js";
+import { buildCompatibleModelsUrl } from "../../../../lib/net/compatibleUrl.js";
+import { readResponseOnce, parseErrorPayload } from "../../../../lib/net/httpBody.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
 const parseOpenAIStyleModels = (data) => {
   if (Array.isArray(data)) return data;
   return data?.data || data?.models || data?.results || [];
+};
+
+/**
+ * Normalize ONE upstream catalog entry to `{ id, name, ... }` without mutating
+ * the upstream model id. Compatible upstreams disagree on the id field:
+ * OpenAI uses `id`, Ollama-style gateways use `model`, some use `slug`, and a
+ * few return a bare string array. Anything without a usable identifier is
+ * dropped rather than shown as "undefined".
+ */
+const normalizeCatalogEntry = (entry) => {
+  if (typeof entry === "string") {
+    const id = entry.trim();
+    return id ? { id, name: id } : null;
+  }
+  if (!entry || typeof entry !== "object") return null;
+  const rawId = entry.id || entry.model || entry.slug || entry.name;
+  if (typeof rawId !== "string" || !rawId.trim()) return null;
+  const id = rawId.trim();
+  const name =
+    (typeof entry.display_name === "string" && entry.display_name.trim()) ||
+    (typeof entry.displayName === "string" && entry.displayName.trim()) ||
+    (typeof entry.name === "string" && entry.name.trim() && entry.name.trim() !== id
+      ? entry.name.trim()
+      : "") ||
+    id;
+  return { ...entry, id, name };
 };
 
 const parseGeminiCliModels = (data) => {
@@ -103,14 +131,26 @@ const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => asyn
         response = await fetchFn(refreshed.accessToken, connection);
       }
     }
-    if (response.ok) {
-      const data = await response.json();
-      const models = parseFn(data);
-      if (models.length > 0) return { models };
+    // Read the body EXACTLY ONCE. The previous `if (ok) json() else text()`
+    // pair was only accidentally safe: a 200 response carrying a non-JSON body
+    // consumed the stream in json(), and any later read of the same response
+    // (including the 401/403 retry path above re-using `response`) threw
+    // "Body is unusable: Body has already been read". readResponseOnce makes
+    // that class of bug unrepresentable.
+    const body = await readResponseOnce(response);
+    if (body.okStatus) {
+      if (!body.parsed) {
+        warning = `${errorLabel}: upstream returned a non-JSON catalog`;
+      } else {
+        const models = parseFn(body.json);
+        if (models.length > 0) return { models };
+      }
     } else {
-      const errorText = await response.text();
-      warning = `${errorLabel}: ${response.status} ${errorText}`;
-      console.log(`${errorLabel} (falling back to static):`, errorText);
+      // Never log the raw body verbatim — an upstream may echo the
+      // Authorization header back inside its error page.
+      const detail = parseErrorPayload(body.text, { status: body.status });
+      warning = `${errorLabel}: ${body.status} ${detail}`;
+      console.log(`${errorLabel} (falling back to static):`, detail);
     }
   } catch (error) {
     warning = `${errorLabel}: ${error.message}`;
@@ -365,13 +405,17 @@ const PROVIDER_MODELS_CONFIG = {
         method: "GET",
         headers: { "Content-Type": "application/json" }
       });
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.log("Error fetching models from ollama-local:", errorText);
-        return { error: `Failed to fetch models: ${response.status}`, status: response.status };
+      // Single read (see buildOAuthResolver for the rationale).
+      const body = await readResponseOnce(response);
+      if (!body.okStatus) {
+        const detail = parseErrorPayload(body.text, { status: body.status });
+        console.log("Error fetching models from ollama-local:", detail);
+        return { error: `Failed to fetch models: ${body.status} ${detail}`, status: body.status };
       }
-      const data = await response.json();
-      return { models: parseOpenAIStyleModels(data) };
+      if (!body.parsed) {
+        return { error: "Ollama returned a non-JSON model catalog", status: 502 };
+      }
+      return { models: parseOpenAIStyleModels(body.json) };
     }
   }
 };
@@ -388,80 +432,63 @@ export async function GET_handler(req, res, { params }) {
       return res.status(404).json({ error: "Connection not found" });
     }
 
-    if (isOpenAICompatibleProvider(connection.provider)) {
-      const baseUrl = connection.providerSpecificData?.baseUrl;
-      if (!baseUrl) {
-        return res.status(400).json({ error: "No base URL configured for OpenAI compatible provider" });
+    // ── Custom (OpenAI/Anthropic-compatible) providers ────────────────────
+    // One shared path for both flavours: the base URL is normalized by
+    // normalizeCompatibleBaseUrl (which strips a pasted `/chat/completions`,
+    // `/models` or `/messages` suffix so we never double the path), and the
+    // response body is read EXACTLY ONCE via readResponseOnce. The old code
+    // read `.text()` on the error branch and `.json()` on the success branch,
+    // which threw "Body is unusable: Body has already been read" whenever an
+    // upstream returned a non-JSON body on a 200.
+    if (isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider)) {
+      const isAnthropic = isAnthropicCompatibleProvider(connection.provider);
+      const url = buildCompatibleModelsUrl(connection.providerSpecificData?.baseUrl, connection.provider);
+      if (!url) {
+        return res.status(400).json({
+          error: `No usable base URL configured for ${isAnthropic ? "Anthropic" : "OpenAI"} compatible provider`,
+        });
       }
-      // Strip ONE trailing slash; tolerate base URLs that already end in /models
-      // (some users paste the full endpoint) so we never build /models/models.
-      let normalizedBase = String(baseUrl).trim().replace(/\/$/, "");
-      if (normalizedBase.endsWith("/models")) {
-        normalizedBase = normalizedBase.slice(0, -"/models".length);
-      }
-      const url = `${normalizedBase}/models`;
       // The API key may be empty for self-hosted / unauthenticated upstreams —
-      // only send the header when a key exists so empty "Bearer " never leaks.
+      // only send the header when a key exists so an empty "Bearer " never leaks.
       const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (connection.apiKey) headers["Authorization"] = `Bearer ${connection.apiKey}`;
-      const response = await fetchWithTimeout(url, { method: "GET", headers });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.log(`Error fetching models from ${connection.provider}:`, errorText);
-        return res.status(response.status).json(
-          { error: `Failed to fetch models: ${response.status}` }
-        );
-      }
-
-      const data = await response.json();
-      const models = data.data || data.models || [];
-
-      return res.json({
-        provider: connection.provider,
-        connectionId: connection.id,
-        models
-      });
-    }
-
-    if (isAnthropicCompatibleProvider(connection.provider)) {
-      let baseUrl = connection.providerSpecificData?.baseUrl;
-      if (!baseUrl) {
-        return res.status(400).json({ error: "No base URL configured for Anthropic compatible provider" });
-      }
-
-      baseUrl = baseUrl.replace(/\/$/, "");
-      if (baseUrl.endsWith("/messages")) {
-        baseUrl = baseUrl.slice(0, -9);
-      }
-
-      const url = `${baseUrl}/models`;
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-        "anthropic-version": "2023-06-01",
-      };
-      // Send the key only when present — self-hosted proxies may not need one.
+      if (isAnthropic) headers["anthropic-version"] = "2023-06-01";
       if (connection.apiKey) {
-        headers["x-api-key"] = connection.apiKey;
-        headers["Authorization"] = `Bearer ${connection.apiKey}`;
+        if (isAnthropic) {
+          headers["x-api-key"] = connection.apiKey;
+          headers["Authorization"] = `Bearer ${connection.apiKey}`;
+        } else {
+          headers["Authorization"] = `Bearer ${connection.apiKey}`;
+        }
       }
-      const response = await fetchWithTimeout(url, { method: "GET", headers });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.log(`Error fetching models from ${connection.provider}:`, errorText);
-        return res.status(response.status).json(
-          { error: `Failed to fetch models: ${response.status}` }
+      let response;
+      try {
+        response = await fetchWithTimeout(url, { method: "GET", headers });
+      } catch (err) {
+        return res.status(502).json({ error: `Failed to reach upstream: ${String(err?.message || err).slice(0, 200)}` });
+      }
+      const body = await readResponseOnce(response);
+      if (!body.okStatus) {
+        // Never log the raw body: it may echo back the Authorization header.
+        console.warn(
+          `Error fetching models from ${connection.provider} (HTTP ${body.status}):`,
+          parseErrorPayload(body.text, { status: body.status }).slice(0, 200)
         );
+        return res.status(body.status || 502).json({
+          error: `Failed to fetch models: ${parseErrorPayload(body.text, { status: body.status })}`,
+        });
       }
-
-      const data = await response.json();
-      const models = data.data || data.models || [];
+      if (!body.parsed) {
+        return res.status(502).json({ error: "Upstream returned a non-JSON model catalog" });
+      }
+      const models = parseOpenAIStyleModels(body.json)
+        .map(normalizeCatalogEntry)
+        .filter((m): m is { id: string } => m !== null);
 
       return res.json({
         provider: connection.provider,
+        providerName: connection.providerSpecificData?.nodeName || null,
         connectionId: connection.id,
-        models
+        models,
       });
     }
 
@@ -519,16 +546,21 @@ export async function GET_handler(req, res, { params }) {
 
     const response = await fetchWithTimeout(url, fetchOptions);
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.log(`Error fetching models from ${connection.provider}:`, errorText);
-      return res.status(response.status).json(
-        { error: `Failed to fetch models: ${response.status}` }
-      );
+    // Single read: a non-JSON 200 body used to be consumed by json() and then
+    // throw on any later read of the same response.
+    const body = await readResponseOnce(response);
+
+    if (!body.okStatus) {
+      const detail = parseErrorPayload(body.text, { status: body.status });
+      // Do not log the raw body — an upstream may echo the auth header back.
+      console.log(`Error fetching models from ${connection.provider}:`, detail);
+      return res.status(body.status || 502).json({ error: `Failed to fetch models: ${detail}` });
+    }
+    if (!body.parsed) {
+      return res.status(502).json({ error: "Upstream returned a non-JSON model catalog" });
     }
 
-    const data = await response.json();
-    const models = config.parseResponse(data);
+    const models = config.parseResponse(body.json);
 
     return res.json({
       provider: connection.provider,

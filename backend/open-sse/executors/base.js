@@ -1,4 +1,5 @@
 import { HTTP_STATUS, RETRY_CONFIG, DEFAULT_RETRY_CONFIG, resolveRetryEntry, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { buildCompatibleChatUrl } from "../../src/lib/net/compatibleUrl.js";
 import { shouldRefreshCredentials } from "../services/oauthCredentialManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { dbg } from "../utils/debugLog.js";
@@ -26,16 +27,21 @@ export class BaseExecutor {
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
+    // Custom providers share one URL builder with DefaultExecutor and the
+    // discovery/test routes (see lib/net/compatibleUrl.js). It strips a pasted
+    // endpoint suffix so `https://host/v1/chat/completions` never becomes
+    // `.../chat/completions/chat/completions`.
     if (this.provider?.startsWith?.("openai-compatible-")) {
-      const baseUrl = credentials?.providerSpecificData?.baseUrl || "https://api.openai.com/v1";
-      const normalized = baseUrl.replace(/\/$/, "");
-      const path = this.provider.includes("responses") ? "/responses" : "/chat/completions";
-      return `${normalized}${path}`;
+      return (
+        buildCompatibleChatUrl(credentials?.providerSpecificData?.baseUrl, this.provider)
+        || "https://api.openai.com/v1/chat/completions"
+      );
     }
     if (this.provider?.startsWith?.("anthropic-compatible-")) {
-      const baseUrl = credentials?.providerSpecificData?.baseUrl || "https://api.anthropic.com/v1";
-      const normalized = baseUrl.replace(/\/$/, "");
-      return `${normalized}/messages`;
+      return (
+        buildCompatibleChatUrl(credentials?.providerSpecificData?.baseUrl, this.provider)
+        || "https://api.anthropic.com/v1/messages"
+      );
     }
     const baseUrls = this.getBaseUrls();
     return baseUrls[urlIndex] || baseUrls[0] || this.config.baseUrl;

@@ -60,15 +60,28 @@ export async function GET(req, res) {
       }
     } catch { }
 
-    // Hide sensitive fields, enrich name for compatible providers
-    const safeConnections = connections.map(c => {
-      const isCompatible = isOpenAICompatibleProvider(c.provider) || isAnthropicCompatibleProvider(c.provider);
-      const name = isCompatible
-        ? (c.name || nodeNameMap[c.provider] || c.providerSpecificData?.nodeName || c.provider)
+    // Hide sensitive fields, enrich name for compatible providers.
+    //
+    // `providerName` is the CONFIGURED node name (e.g. "Xkiro") and is the
+    // authoritative provider label for custom providers. `name` stays the
+    // connection's own editable label, falling back to the node name and only
+    // then to the raw node id. Previously the fall-through order meant an
+    // unnamed connection surfaced the opaque `openai-compatible-chat-<uuid>`
+    // id in the UI.
+    const safeConnections = connections.map((c) => {
+      const isCustom = isOpenAICompatibleProvider(c.provider)
+        || isAnthropicCompatibleProvider(c.provider)
+        || isCustomEmbeddingProvider(c.provider);
+      const providerName = isCustom
+        ? (nodeNameMap[c.provider] || c.providerSpecificData?.nodeName || null)
+        : null;
+      const name = isCustom
+        ? (c.name || providerName || c.provider)
         : c.name;
       return {
         ...c,
         name,
+        ...(isCustom ? { providerName: providerName || c.provider } : {}),
         apiKey: undefined,
         accessToken: undefined,
         refreshToken: undefined,
@@ -81,6 +94,26 @@ export async function GET(req, res) {
     console.log("Error fetching providers:", error);
     return res.status(500).json({ error: "Failed to fetch providers" });
   }
+}
+
+/**
+ * Return a connection name not already used by another connection of the same
+ * provider. API-key connections dedup on (authType, name) in
+ * connectionsRepo.createProviderConnection, so a duplicate name would silently
+ * UPDATE the existing row and replace its API key — losing that connection's
+ * credentials. Disambiguating ("Main", "Main 2") keeps every key intact.
+ */
+async function uniqueConnectionName(provider, desired) {
+  const existing = await getProviderConnections({ provider });
+  const taken = new Set(
+    existing.filter((c) => c.authType === "apikey" || c.authType === "cookie").map((c) => c.name).filter(Boolean)
+  );
+  if (!taken.has(desired)) return desired;
+  for (let i = 2; i < 500; i += 1) {
+    const candidate = `${desired} ${i}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  return `${desired} ${Date.now()}`;
 }
 
 // POST /api/providers - Create new connection (API Key only, OAuth via separate flow)
@@ -116,58 +149,56 @@ export async function POST_handler(req, res) {
     if (!apiKey && provider !== "ollama-local") {
       return res.status(400).json({ error: `${isWebCookieProvider ? "Cookie value" : "API Key"} is required` });
     }
-    const connectionName = name || displayName || AI_PROVIDERS[provider]?.name;
+    const isCustomNode = isOpenAICompatibleProvider(provider)
+      || isAnthropicCompatibleProvider(provider)
+      || isCustomEmbeddingProvider(provider);
+
+    // Resolve the custom node once: it supplies the provider's own name,
+    // prefix, api type and base URL for every connection created against it.
+    let node = null;
+    if (isCustomNode) {
+      node = await getProviderNodeById(provider);
+      if (!node) {
+        const label = isAnthropicCompatibleProvider(provider)
+          ? "Anthropic Compatible"
+          : isCustomEmbeddingProvider(provider) ? "Custom Embedding" : "OpenAI Compatible";
+        return res.status(404).json({ error: `${label} provider not found` });
+      }
+    }
+
+    // Custom nodes: the CONFIGURED node name is the provider's name and is the
+    // default connection name. Previously a connection without an explicit
+    // name fell through to the raw node id, so the UI showed
+    // "openai-compatible-chat-<uuid>" in place of e.g. "Xkiro".
+    const connectionName = (
+      name || displayName || node?.name || AI_PROVIDERS[provider]?.name || ""
+    ).trim();
     if (!connectionName) {
       return res.status(400).json({ error: "Name is required" });
     }
+    // The connections table dedups API-key connections by (authType, name).
+    // Bulk/duplicate names would silently UPDATE the existing connection and
+    // overwrite its API key, so disambiguate instead.
+    const finalName = isCustomNode
+      ? await uniqueConnectionName(provider, connectionName)
+      : connectionName;
 
     let providerSpecificData = normalizeProviderSpecificData(provider, body, body.providerSpecificData);
 
-    // Compatible/embedding nodes allow exactly one connection each. These guards were
-    // dropped accidentally during the bun:sqlite refactor (v0.4.28); restored to honor
-    // the contract locked in by tests/unit/compatible-provider-connections.test.js (#925).
-    if (isOpenAICompatibleProvider(provider)) {
-      const node = await getProviderNodeById(provider);
-      if (!node) {
-        return res.status(404).json({ error: "OpenAI Compatible node not found" });
-      }
-      const existingConnections = await getProviderConnections({ provider });
-      if (existingConnections.length > 0) {
-        return res.status(400).json({ error: "Only one connection is allowed for this OpenAI Compatible node" });
-      }
+    // Merge the node config UNDER the caller's own settings. A connection may
+    // legitimately override baseUrl (a different endpoint for one key), and the
+    // previous wholesale assignment discarded per-connection keys such as the
+    // proxy binding. Multiple connections per custom node are supported.
+    if (node) {
       providerSpecificData = {
         prefix: node.prefix,
-        apiType: node.apiType,
+        ...(node.apiType ? { apiType: node.apiType } : {}),
         baseUrl: node.baseUrl,
+        // nodeName is the provider's configured name. The key always mirrors
+        // the node so a rename is reflected everywhere without re-writing
+        // every connection.
         nodeName: node.name,
-      };
-    } else if (isAnthropicCompatibleProvider(provider)) {
-      const node = await getProviderNodeById(provider);
-      if (!node) {
-        return res.status(404).json({ error: "Anthropic Compatible node not found" });
-      }
-      const existingConnections = await getProviderConnections({ provider });
-      if (existingConnections.length > 0) {
-        return res.status(400).json({ error: "Only one connection is allowed for this Anthropic Compatible node" });
-      }
-      providerSpecificData = {
-        prefix: node.prefix,
-        baseUrl: node.baseUrl,
-        nodeName: node.name,
-      };
-    } else if (isCustomEmbeddingProvider(provider)) {
-      const node = await getProviderNodeById(provider);
-      if (!node) {
-        return res.status(404).json({ error: "Custom Embedding node not found" });
-      }
-      const existingConnections = await getProviderConnections({ provider });
-      if (existingConnections.length > 0) {
-        return res.status(400).json({ error: "Only one connection is allowed for this Custom Embedding node" });
-      }
-      providerSpecificData = {
-        prefix: node.prefix,
-        baseUrl: node.baseUrl,
-        nodeName: node.name,
+        ...(providerSpecificData || {}),
       };
     }
 
@@ -185,7 +216,7 @@ export async function POST_handler(req, res) {
     const newConnection = await createProviderConnection({
       provider,
       authType: isWebCookieProvider ? "cookie" : "apikey",
-      name: connectionName,
+      name: finalName,
       apiKey: apiKey || "",
       email: email || "",
       priority: priority || 1,

@@ -9,6 +9,8 @@ import {
   resolveBulkAdd,
   resolveDisableNotAdded,
   resolveAutoAdd,
+  normalizeAutoAddPolicy,
+  AUTO_ADD_POLICIES,
 } from "../src/shared/utils/discoveredModels.js";
 
 describe("discoveredModels client mirror", () => {
@@ -65,5 +67,20 @@ describe("discoveredModels client mirror", () => {
     const error = filterDiscovered(discovered, { status: "error", testResults: {}, disabledIds: [] });
     assert.equal(working.rows.length, 0);
     assert.equal(error.rows.length, 0);
+  });
+
+  it("the legacy 'working-ignore-failed' id resolves and is not offered", () => {
+    assert.equal(normalizeAutoAddPolicy("working-ignore-failed"), "working-only");
+    assert.equal(AUTO_ADD_POLICIES.includes("working-ignore-failed"), false);
+  });
+
+  it("every offered policy yields a distinct outcome", () => {
+    const discoveredRows = [
+      { id: "w" }, { id: "bad" }, { id: "newbie" }, { id: "off" }, { id: "added", isAdded: true },
+    ];
+    const testResults = { w: "ok", bad: "error" };
+    const outcomes = AUTO_ADD_POLICIES.map((policy) =>
+      JSON.stringify(resolveAutoAdd({ discoveredRows, testResults, disabledIds: ["off"], policy })));
+    assert.equal(new Set(outcomes).size, AUTO_ADD_POLICIES.length);
   });
 });

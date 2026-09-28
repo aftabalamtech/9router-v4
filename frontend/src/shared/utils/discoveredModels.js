@@ -4,29 +4,41 @@
 // Pure functions only — safe for `node --test`.
 import { getTestStatus } from "./modelEligibility.js";
 
+// Mirrors backend/src/lib/models/autoAdd.js. Keep the two in sync: the backend
+// is authoritative for persistence, this copy drives the dropdown.
 export const AUTO_ADD_POLICIES = Object.freeze([
   "working-only",
   "working-disable-failed",
-  "working-ignore-failed",
+  "working-untested",
+  "all",
 ]);
 
+// Previously-persisted ids kept readable; not offered in the dropdown because
+// their behaviour duplicates another option.
+export const AUTO_ADD_POLICY_ALIASES = Object.freeze({
+  "working-ignore-failed": "working-only",
+});
+
 export const AUTO_ADD_POLICY_LABELS = Object.freeze({
-  "working-only": "Only add working models",
-  "working-disable-failed": "Add working models and disable failed models",
-  "working-ignore-failed": "Add working models; ignore failed models",
+  "working-only": "Working models only",
+  "working-disable-failed": "Working models + failed disabled",
+  "working-untested": "Working models + untested models",
+  all: "All discovered models",
 });
 
 export const AUTO_ADD_POLICY_DESCRIPTIONS = Object.freeze({
   "working-only":
-    "Automatically add models whose latest test passed. Failed or untested models stay in the discovered catalog.",
+    "Add models whose latest test passed. Untested and failed models stay in the discovered catalog for manual review.",
   "working-disable-failed":
-    "Automatically add working models. Failed models stay in the catalog and are placed in Disabled models so they cannot be routed to.",
-  "working-ignore-failed":
-    "Automatically add working models. Failed models are left untouched in the discovered catalog for manual review.",
+    "Add working models. Failed models stay in the catalog but go to Disabled models, so they can never be routed to.",
+  "working-untested":
+    "Add working models and untested models. Failed models stay in the catalog and go to Disabled models.",
+  all: "Add every eligible discovered model, whatever its test status.",
 });
 
 export function normalizeAutoAddPolicy(value, fallback = "working-only") {
-  return AUTO_ADD_POLICIES.includes(value) ? value : fallback;
+  const resolved = AUTO_ADD_POLICY_ALIASES[value] || value;
+  return AUTO_ADD_POLICIES.includes(resolved) ? resolved : fallback;
 }
 
 export function stableModelId(id) {
@@ -178,10 +190,21 @@ export function resolveAutoAdd({
     const id = stableModelId(row?.id);
     if (!id || row?.isAdded || disabled.has(id)) continue;
     const status = getTestStatus(id, testResults);
-    if (status === "ok") toAdd.push(id);
-    else if (status === "error") {
-      if (effective === "working-disable-failed") toDisable.push(id);
-    } else if (includeUntested) toAdd.push(id);
+    if (effective === "all") {
+      toAdd.push(id);
+      continue;
+    }
+    if (status === "ok") {
+      toAdd.push(id);
+      continue;
+    }
+    if (status === "error") {
+      if (effective === "working-disable-failed" || effective === "working-untested") {
+        toDisable.push(id);
+      }
+      continue;
+    }
+    if (effective === "working-untested" || includeUntested) toAdd.push(id);
   }
   return { toAdd, toDisable };
 }

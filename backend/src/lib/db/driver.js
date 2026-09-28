@@ -57,6 +57,11 @@ async function initAdapter() {
   if (databaseUrl) {
     const { createPostgresAdapter } = await import("./adapters/postgresAdapter.js");
     const adapter = await createPostgresAdapter(databaseUrl);
+    // PostgreSQL runs the SAME versioned migration chain + additive schema
+    // sync as SQLite. Previously migrations only ran on the SQLite path, so a
+    // PG deployment silently skipped schemaVersion and additive column sync.
+    const { runMigrationOnce } = await import("./migrate.js");
+    await runMigrationOnce(adapter, { dialect: "postgres" });
     if (!state.logged) {
       const parsed = new URL(databaseUrl);
       console.log(`[DB] Driver: ${adapter.driver} | host: ${parsed.hostname} | database: ${parsed.pathname.slice(1)}`);
@@ -81,7 +86,7 @@ async function initAdapter() {
   }
 
   const { runMigrationOnce } = await import("./migrate.js");
-  await runMigrationOnce(adapter);
+  await runMigrationOnce(adapter, { dialect: "sqlite" });
   const { createAsyncAdapter } = await import("./adapters/asyncAdapter.js");
   return createAsyncAdapter(adapter);
 }

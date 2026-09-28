@@ -5,6 +5,7 @@ import Modal from "./Modal";
 import ProviderIcon from "./ProviderIcon";
 import { getModelsByProviderId } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
+import { getProviderDisplayName, buildNodeNameMap } from "@/shared/utils/providerNaming";
 
 // Provider order: OAuth first, then Free Tier, then API Key (matches dashboard/providers)
 const PROVIDER_ORDER = [
@@ -128,6 +129,10 @@ export default function ModelSelectModal({
 
   const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...APIKEY_PROVIDERS }), []);
 
+  // providerId → configured node name, so every group header shows the name the
+  // user gave the custom provider rather than a generic label.
+  const nodeNameMap = useMemo(() => buildNodeNameMap(providerNodes), [providerNodes]);
+
   // Group models by provider with priority order
   const groupedModels = useMemo(() => {
     const groups = {};
@@ -207,9 +212,12 @@ export default function ModelSelectModal({
         }
 
         if (combined.length > 0) {
-          // Check for custom name from providerNodes (for compatible providers)
-          const matchedNode = providerNodes.find(node => node.id === providerId);
-          const displayName = matchedNode?.name || providerInfo.name;
+          // Custom provider names come from the node record ("Xkiro"), not the
+          // generic type label or the node id.
+          const displayName = getProviderDisplayName(providerId, {
+            nodeNames: nodeNameMap,
+            providerNodes,
+          });
 
           groups[providerId] = {
             name: displayName,
@@ -224,7 +232,14 @@ export default function ModelSelectModal({
         // Find connection object to get prefix synchronously without waiting for providerNodes fetch
         const connection = activeProviders.find(p => p.provider === providerId);
         const matchedNode = providerNodes.find(node => node.id === providerId);
-        const displayName = connection?.name || matchedNode?.name || providerInfo.name;
+        // The provider LABEL is always the configured name. The connection's own
+        // name is a per-key label, not the provider name — using it here is what
+        // made one key's alias appear as the provider title.
+        const displayName = getProviderDisplayName(providerId, {
+          nodeNames: nodeNameMap,
+          node: matchedNode,
+          connection,
+        });
         const nodePrefix = connection?.providerSpecificData?.prefix || matchedNode?.prefix || providerId;
 
         // Aliases are stored using the raw providerId as key (e.g. "openai-compatible-chat-<uuid>/glm-4.7"),
@@ -327,7 +342,7 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, blockedModels, kindFilter, activeProviders]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, nodeNameMap, customModels, disabledModels, blockedModels, kindFilter, activeProviders]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {

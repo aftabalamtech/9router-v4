@@ -219,11 +219,25 @@ describe("auto-add policies", () => {
   ];
   const results = { "p/w": "ok", "p/bad": "error" };
 
-  it("auto-add defaults to OFF with working-only policy", () => {
+  it("auto-add defaults to OFF with working-only policy (pinned above)", () => {
     const s = normalizeSyncSettings(null);
     assert.equal(s.autoAdd, false);
     assert.equal(s.autoAddPolicy, "working-only");
     assert.equal(s.includeUntested, false);
+  });
+
+  it("every policy leaves added models and disabled models alone", () => {
+    for (const policy of AUTO_ADD_POLICIES) {
+      const { toAdd, toDisable } = resolveAutoAdd({
+        discoveredRows: rows(),
+        testResults: results,
+        disabledIds: ["off"],
+        policy,
+      });
+      assert.equal(toAdd.includes("added"), false, `${policy} must not re-add an existing model`);
+      assert.equal(toAdd.includes("off"), false, `${policy} must not touch a disabled model`);
+      assert.equal(toDisable.includes("off"), false, `${policy} must not re-disable`);
+    }
   });
 
   it("working-only: adds working, leaves failed+untested in catalog", () => {
@@ -248,15 +262,41 @@ describe("auto-add policies", () => {
     assert.deepEqual(toDisable, ["bad"]);
   });
 
-  it("working-ignore-failed: adds working, disables nothing", () => {
+  it("working-untested: adds working AND untested, disables failed", () => {
     const { toAdd, toDisable } = resolveAutoAdd({
       discoveredRows: rows(),
       testResults: results,
       disabledIds: ["off"],
-      policy: "working-ignore-failed",
+      policy: "working-untested",
     });
-    assert.deepEqual(toAdd, ["w"]);
+    assert.deepEqual(toAdd.sort(), ["newbie", "w"]);
+    assert.deepEqual(toDisable, ["bad"]);
+  });
+
+  it("the legacy 'working-ignore-failed' id still resolves (settings compat)", () => {
+    assert.equal(normalizeAutoAddPolicy("working-ignore-failed"), "working-only");
+    // ...and is not offered as its own option, because it duplicates
+    // working-only exactly.
+    assert.equal(AUTO_ADD_POLICIES.includes("working-ignore-failed"), false);
+  });
+
+  it("all: adds every eligible model whatever its status", () => {
+    const { toAdd, toDisable } = resolveAutoAdd({
+      discoveredRows: rows(),
+      testResults: results,
+      disabledIds: ["off"],
+      policy: "all",
+    });
+    assert.deepEqual(toAdd.sort(), ["bad", "newbie", "w"]);
     assert.deepEqual(toDisable, []);
+  });
+
+  it("every policy yields a distinct outcome (no ambiguous duplicates)", () => {
+    const base = { discoveredRows: rows(), testResults: results, disabledIds: [] };
+    const outcomes = AUTO_ADD_POLICIES.map(
+      (p) => JSON.stringify(resolveAutoAdd({ ...base, policy: p }))
+    );
+    assert.equal(new Set(outcomes).size, AUTO_ADD_POLICIES.length);
   });
 
   it("includeUntested is opt-in and off by default", () => {
@@ -296,10 +336,29 @@ describe("auto-add policies", () => {
   });
 
   it("empty catalog resolves to nothing (sync failure deletes nothing)", () => {
-    const { toAdd, toDisable } = resolveAutoAdd({ discoveredRows: [], testResults: {}, disabledIds: [], policy: "working-disable-failed" });
+    const { toAdd, toDisable } = resolveAutoAdd({ discoveredRows: [], testResults: {}, disabledIds: [], policy: "all" });
     assert.deepEqual(toAdd, []);
     assert.deepEqual(toDisable, []);
     assert.deepEqual(resolveBulkAdd([]), { targets: [], skipped: [] });
+  });
+
+  it("includeUntested stays opt-in for the working-only policy", () => {
+    // disabledIds deliberately empty so the untested-but-enabled rows are
+    // visible in the diff.
+    const base = { discoveredRows: rows(), testResults: results, disabledIds: [], policy: "working-only" };
+    assert.deepEqual(resolveAutoAdd(base).toAdd, ["w"]);
+    assert.deepEqual(
+      resolveAutoAdd({ ...base, includeUntested: true }).toAdd.sort(),
+      ["newbie", "off", "w"]
+    );
+  });
+
+  it("normalizeSyncSettings defaults to OFF with the safest policy", () => {
+    const s = normalizeSyncSettings(null);
+    assert.equal(s.autoAdd, false);
+    assert.equal(s.autoAddPolicy, "working-only");
+    assert.equal(s.includeUntested, false);
+    assert.ok(AUTO_ADD_POLICIES.includes(s.autoAddPolicy));
   });
 
   it("unknown policies fall back safely", () => {

@@ -10,16 +10,42 @@
 // Syncing refreshes the discovered catalog; added models (aliases) are never
 // recreated or deleted by these helpers.
 
+// Auto-Add policies.
+//
+// AUTO_ADD_POLICIES is what the UI offers. Every entry produces a DISTINCT
+// outcome — the requirement is to avoid options that silently behave the same.
+//
+// AUTO_ADD_POLICY_ALIASES keeps previously-persisted settings working.
+// "working-ignore-failed" was an earlier id whose behaviour is exactly
+// "working-only" (add working, touch nothing else); it is accepted on read and
+// normalized, but is NOT offered in the dropdown so users never see two
+// identical choices.
 export const AUTO_ADD_POLICIES = Object.freeze([
   "working-only",
   "working-disable-failed",
-  "working-ignore-failed",
+  "working-untested",
+  "all",
 ]);
 
+export const AUTO_ADD_POLICY_ALIASES = Object.freeze({
+  "working-ignore-failed": "working-only",
+});
+
 export const AUTO_ADD_POLICY_LABELS = Object.freeze({
-  "working-only": "Only add working models",
-  "working-disable-failed": "Add working models and disable failed models",
-  "working-ignore-failed": "Add working models; ignore failed models",
+  "working-only": "Working models only",
+  "working-disable-failed": "Working models + failed disabled",
+  "working-untested": "Working models + untested models",
+  all: "All discovered models",
+});
+
+export const AUTO_ADD_POLICY_DESCRIPTIONS = Object.freeze({
+  "working-only":
+    "Add models whose latest test passed. Untested and failed models stay in the discovered catalog for manual review.",
+  "working-disable-failed":
+    "Add working models. Failed models stay in the catalog but are placed in Disabled models, so they can never be routed to.",
+  "working-untested":
+    "Add working models and untested models. Failed models stay in the catalog and are placed in Disabled models.",
+  all: "Add every eligible discovered model, whatever its test status.",
 });
 
 export const DEFAULT_SYNC_SETTINGS = Object.freeze({
@@ -42,7 +68,8 @@ export const DISCOVERED_STATUS_FILTERS = Object.freeze([
 export const DISCOVERED_PRICE_FILTERS = Object.freeze(["all", "free", "paid"]);
 
 export function normalizeAutoAddPolicy(value, fallback = "working-only") {
-  return AUTO_ADD_POLICIES.includes(value) ? value : fallback;
+  const resolved = AUTO_ADD_POLICY_ALIASES[value] || value;
+  return AUTO_ADD_POLICIES.includes(resolved) ? resolved : fallback;
 }
 
 // Merge stored sync settings with defaults so records written before Auto-Add
@@ -310,15 +337,24 @@ export function resolveAutoAdd({
     const id = stableModelId(row?.id);
     if (!id || row?.isAdded || disabled.has(id)) continue;
     const status = testStatusOf(row.fullModel || id, testResults);
+    if (effective === "all") {
+      // Everything eligible, subject to the existing safety rules above.
+      toAdd.push(id);
+      continue;
+    }
     if (status === "ok") {
       toAdd.push(id);
-    } else if (status === "error") {
-      if (effective === "working-disable-failed") toDisable.push(id);
-      // working-only / working-ignore-failed: leave in the discovered catalog
-      // for manual review.
-    } else if (includeUntested) {
-      toAdd.push(id);
+      continue;
     }
+    if (status === "error") {
+      // `working-ignore-failed` deliberately touches nothing on failure.
+      if (effective === "working-disable-failed" || effective === "working-untested") {
+        toDisable.push(id);
+      }
+      continue;
+    }
+    // status === "untested"
+    if (effective === "working-untested" || includeUntested) toAdd.push(id);
   }
   return { toAdd, toDisable };
 }

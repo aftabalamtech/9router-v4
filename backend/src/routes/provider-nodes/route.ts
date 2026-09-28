@@ -2,6 +2,7 @@
 import { createProviderNode, getProviderNodes } from "../../models/index.js";
 import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX } from "../../shared/constants/providers.js";
 import { generateId } from "../../shared/utils/index.js";
+import { normalizeCompatibleBaseUrl } from "../../lib/net/compatibleUrl.js";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +17,22 @@ const ANTHROPIC_COMPATIBLE_DEFAULTS = {
 const CUSTOM_EMBEDDING_DEFAULTS = {
   baseUrl: "https://api.openai.com/v1",
 };
+
+/**
+ * Store a base URL in normalized form.
+ *
+ * Users routinely paste the FULL endpoint (`https://host/v1/chat/completions`,
+ * `https://host/v1/models`, `https://host/v1/messages`) into the node form.
+ * Previously only `/messages` and `/embeddings` were stripped and each kind
+ * stripped a different amount, so a pasted `/v1/models` produced
+ * `.../models/models` on discovery while chat produced
+ * `.../models/chat/completions`. One normalizer for all three kinds is the
+ * actual fix; the request-time builder is idempotent on top of it.
+ */
+function sanitizeBaseUrl(raw: string | undefined | null, fallback: string): string {
+  const candidate = (raw ?? "").toString().trim() || fallback;
+  return normalizeCompatibleBaseUrl(candidate) || fallback;
+}
 
 // GET /api/provider-nodes - List all provider nodes
 export async function GET(req, res) {
@@ -55,42 +72,29 @@ export async function POST_handler(req, res) {
         type: "openai-compatible",
         prefix: prefix.trim(),
         apiType,
-        baseUrl: (baseUrl || OPENAI_COMPATIBLE_DEFAULTS.baseUrl).trim(),
+        baseUrl: sanitizeBaseUrl(baseUrl, OPENAI_COMPATIBLE_DEFAULTS.baseUrl),
         name: name.trim(),
       });
       return res.status(201).json({ node });
     }
 
     if (nodeType === "custom-embedding") {
-      // Strip trailing slash and /embeddings if user pasted full endpoint
-      let sanitizedBaseUrl = (baseUrl || CUSTOM_EMBEDDING_DEFAULTS.baseUrl).trim().replace(/\/$/, "");
-      if (sanitizedBaseUrl.endsWith("/embeddings")) {
-        sanitizedBaseUrl = sanitizedBaseUrl.slice(0, -"/embeddings".length);
-      }
-
       const node = await createProviderNode({
         id: `${CUSTOM_EMBEDDING_PREFIX}${generateId()}`,
         type: "custom-embedding",
         prefix: prefix.trim(),
-        baseUrl: sanitizedBaseUrl,
+        baseUrl: sanitizeBaseUrl(baseUrl, CUSTOM_EMBEDDING_DEFAULTS.baseUrl),
         name: name.trim(),
       });
       return res.status(201).json({ node });
     }
 
     if (nodeType === "anthropic-compatible") {
-      // Sanitize Base URL: remove trailing slash, and remove trailing /messages if user added it
-      // This prevents double-appending /messages at runtime
-      let sanitizedBaseUrl = (baseUrl || ANTHROPIC_COMPATIBLE_DEFAULTS.baseUrl).trim().replace(/\/$/, "");
-      if (sanitizedBaseUrl.endsWith("/messages")) {
-        sanitizedBaseUrl = sanitizedBaseUrl.slice(0, -9); // remove /messages
-      }
-
       const node = await createProviderNode({
         id: `${ANTHROPIC_COMPATIBLE_PREFIX}${generateId()}`,
         type: "anthropic-compatible",
         prefix: prefix.trim(),
-        baseUrl: sanitizedBaseUrl,
+        baseUrl: sanitizeBaseUrl(baseUrl, ANTHROPIC_COMPATIBLE_DEFAULTS.baseUrl),
         name: name.trim(),
       });
       return res.status(201).json({ node });

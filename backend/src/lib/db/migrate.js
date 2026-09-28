@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { LEGACY_FILES, DB_DIR, DATA_FILE } from "./paths.js";
-import { TABLES, buildCreateTableSql } from "./schema.js";
+import { TABLES, buildCreateTableSql, toPostgresColumnDef } from "./schema.js";
 import { MIGRATIONS, latestVersion } from "./migrations/index.js";
 import { getMetaSync, setMetaSync } from "./helpers/metaStore.js";
 import { makeBackupDir, backupFile, pruneOldBackups } from "./backup.js";
@@ -54,9 +54,13 @@ function isFreshDb(adapter) {
 }
 
 // ─── Versioned migrations runner (skip-version safe) ─────────────────────
-function runVersionedMigrations(adapter) {
+// Migrations receive the dialect so CREATE TABLE / rebuild SQL can be emitted
+// for the active engine. Both SQLite and PostgreSQL run the SAME versioned
+// chain — schemaVersion parity between the two engines is required, otherwise
+// a DB created on one engine silently diverges from the other.
+function runVersionedMigrations(adapter, dialect) {
   // Bootstrap _meta first so we can read schemaVersion
-  adapter.exec(buildCreateTableSql("_meta", TABLES._meta));
+  adapter.exec(buildCreateTableSql("_meta", TABLES._meta, dialect));
 
   const current = parseInt(getMetaSync(adapter, "schemaVersion", "0"), 10) || 0;
   const target = latestVersion();
@@ -66,7 +70,7 @@ function runVersionedMigrations(adapter) {
   let lastApplied = current;
   for (const m of pending) {
     adapter.transaction(() => {
-      m.up(adapter);
+      m.up(adapter, dialect);
       setMetaSync(adapter, "schemaVersion", m.version);
     });
     lastApplied = m.version;
@@ -76,28 +80,42 @@ function runVersionedMigrations(adapter) {
 }
 
 // ─── Auto-sync (additive only): add missing tables/columns/indexes ───────
-function syncSchemaFromTables(adapter) {
+// Dialect-aware column introspection: SQLite uses PRAGMA table_info,
+// PostgreSQL uses information_schema (unquoted identifiers are stored folded
+// to lowercase there, so comparisons happen lowercased on both sides).
+function syncSchemaFromTables(adapter, dialect = "sqlite") {
+  const isPostgres = dialect === "postgres";
   for (const [tableName, def] of Object.entries(TABLES)) {
     // Create table if absent
-    adapter.exec(buildCreateTableSql(tableName, def));
+    adapter.exec(buildCreateTableSql(tableName, def, dialect));
 
     // Diff columns
-    const existing = adapter.all(`PRAGMA table_info(${tableName})`);
-    const existingNames = new Set(existing.map((r) => r.name));
+    let existingNames;
+    if (isPostgres) {
+      const existing = adapter.all(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = ?`,
+        [tableName.toLowerCase()]
+      );
+      existingNames = new Set(existing.map((r) => String(r.column_name).toLowerCase()));
+    } else {
+      const existing = adapter.all(`PRAGMA table_info(${tableName})`);
+      existingNames = new Set(existing.map((r) => String(r.name).toLowerCase()));
+    }
     for (const [colName, colDef] of Object.entries(def.columns)) {
-      if (!existingNames.has(colName)) {
-        // SQLite ADD COLUMN restrictions: no PRIMARY KEY / UNIQUE w/o NULL ok.
-        // We strip PRIMARY KEY / UNIQUE since those are only valid at create time.
-        const safeDef = colDef
-          .replace(/PRIMARY KEY( AUTOINCREMENT)?/i, "")
-          .replace(/UNIQUE/i, "")
-          .trim();
-        try {
-          adapter.exec(`ALTER TABLE ${tableName} ADD COLUMN ${colName} ${safeDef}`);
-          console.log(`[DB][sync] +column ${tableName}.${colName}`);
-        } catch (e) {
-          console.warn(`[DB][sync] add column ${tableName}.${colName} failed: ${e.message}`);
-        }
+      if (existingNames.has(colName.toLowerCase())) continue;
+      // ADD COLUMN restrictions on both engines: no PRIMARY KEY / UNIQUE /
+      // CHECK — those are only valid at create time.
+      const safeDef = (isPostgres ? toPostgresColumnDef(colDef) : colDef)
+        .replace(/PRIMARY KEY( AUTOINCREMENT)?/i, "")
+        .replace(/UNIQUE/i, "")
+        .replace(/CHECK\s*\([^)]*\)/i, "")
+        .trim();
+      try {
+        adapter.exec(`ALTER TABLE ${tableName} ADD COLUMN ${colName} ${safeDef}`);
+        console.log(`[DB][sync] +column ${tableName}.${colName}`);
+      } catch (e) {
+        console.warn(`[DB][sync] add column ${tableName}.${colName} failed: ${e.message}`);
       }
     }
 
@@ -213,7 +231,9 @@ function importLegacyDetails(adapter, data) {
 }
 
 // ─── Main entry ──────────────────────────────────────────────────────────
-export async function runMigrationOnce(adapter) {
+// Runs the versioned migration chain + additive schema sync for BOTH engines.
+// Every step is idempotent and additive — existing rows are never deleted.
+export async function runMigrationOnce(adapter, { dialect = "sqlite" } = {}) {
   if (_migratedAdapters.has(adapter)) return;
   _migratedAdapters.add(adapter);
 
@@ -222,10 +242,10 @@ export async function runMigrationOnce(adapter) {
   const fresh = isFreshDb(adapter);
 
   // 1. Always run versioned migrations chain (skip-version safe)
-  const migInfo = runVersionedMigrations(adapter);
+  const migInfo = runVersionedMigrations(adapter, dialect);
 
   // 2. Additive sync (auto add missing columns/indexes declared in TABLES)
-  syncSchemaFromTables(adapter);
+  syncSchemaFromTables(adapter, dialect);
 
   // 3. One-time legacy JSON import (only if DB was fresh on entry)
   const alreadyImported = fs.existsSync(MIGRATED_MARKER);
@@ -235,7 +255,13 @@ export async function runMigrationOnce(adapter) {
   const legacyDetails = readJsonSafe(LEGACY_FILES.details);
   const hasLegacy = !!(legacyMain || legacyUsage || legacyDisabled || legacyDetails);
 
-  if (fresh && hasLegacy && !alreadyImported) {
+  // Legacy JSON import is a SQLite-file-era feature. It must NEVER run against
+  // PostgreSQL: an auto-import of whatever happens to sit in the container's
+  // DATA_DIR would silently merge development data into production. Cross-DB
+  // migration stays explicit via Settings → Database export/import.
+  if (fresh && hasLegacy && !alreadyImported && dialect !== "sqlite") {
+    console.log("[DB][migrate] legacy JSON files present but DATABASE_URL is PostgreSQL — skipping auto-import (use Settings → Database to import explicitly).");
+  } else if (fresh && hasLegacy && !alreadyImported) {
     const t0 = Date.now();
     const backupDir = makeBackupDir("migrate-from-json");
     for (const f of Object.values(LEGACY_FILES)) backupFile(f, backupDir);
@@ -268,7 +294,17 @@ export async function runMigrationOnce(adapter) {
     return;
   }
 
-  // 4. App version bump → backup data.sqlite (safety net before user-side upgrade)
+  // 4. App version bump → backup data.sqlite (safety net before user-side upgrade).
+  // File backups only make sense for the file-backed SQLite engine; on
+  // PostgreSQL we still stamp appVersion (used by diagnostics) but skip them.
+  if (dialect !== "sqlite") {
+    const oldVerPg = getMetaSync(adapter, "appVersion", null);
+    if (oldVerPg !== getAppVersion()) {
+      setMetaSync(adapter, "appVersion", getAppVersion());
+      console.log(`[DB][migrate] App ${oldVerPg || "(none)"} → ${getAppVersion()} | schema ${migInfo.from} → ${migInfo.to}`);
+    }
+    return;
+  }
   const oldVer = getMetaSync(adapter, "appVersion", null);
   const newVer = getAppVersion();
   if (oldVer && oldVer !== newVer) {

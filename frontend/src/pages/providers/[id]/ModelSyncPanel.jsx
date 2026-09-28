@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import PropTypes from "prop-types";
 import { Button } from "@/shared/components";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
@@ -44,7 +45,7 @@ function formatElapsed(ms) {
 export default function ModelSyncPanel({
   providerId, providerStorageAlias, providerLabel,
   connections, modelAliases, hardcodedIds, testResults, disabledIds,
-  onAddModel, onCatalogChanged,
+  isCustomProvider, onAddModel, onTestResult, onCatalogChanged,
 }) {
   const [settings, setSettings] = useState({ autoFetch: false, autoSync: false, lastSyncAt: null, autoAdd: false, autoAddPolicy: "working-only", includeUntested: false });
   const [status, setStatus] = useState({ syncedCount: 0, staleCount: 0 });
@@ -53,6 +54,13 @@ export default function ModelSyncPanel({
   const [error, setError] = useState("");
   const [autoAddSummary, setAutoAddSummary] = useState(null);
   const [showAutoAddMenu, setShowAutoAddMenu] = useState(false);
+  const autoAddAnchorRef = useRef(null);
+  const autoAddMenuRef = useRef(null);
+  // Discovery panel visibility. Opens on the first sync of a session and
+  // reopens on demand; Close only hides it — the persisted catalog and every
+  // model state are untouched, so reopening shows the same results.
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [catalogSeen, setCatalogSeen] = useState(false);
   const esRef = useRef(null);
   const pollRef = useRef(null);
   const activeRef = useRef(false);
@@ -86,6 +94,15 @@ export default function ModelSyncPanel({
   }, [base, storageQuery]);
 
   useEffect(() => { refreshStatus(true); }, [refreshStatus]);
+
+  // On mount, reveal the panel when a catalog already exists so a page refresh
+  // shows the persisted discovery results instead of an empty-looking section.
+  useEffect(() => {
+    if (!catalogSeen && status.syncedCount > 0) {
+      setPanelOpen(true);
+      setCatalogSeen(true);
+    }
+  }, [status.syncedCount, catalogSeen]);
 
   const applyAutoAdd = useCallback(async (jobId) => {
     // Auto-Add runs once per finished sync job, using the latest persisted
@@ -250,6 +267,9 @@ export default function ModelSyncPanel({
     if (activeRef.current) return null;
     setError("");
     setAutoAddSummary(null);
+    // Sync Now opens/expands the discovery panel so the user can review the
+    // results as soon as they land.
+    setPanelOpen(true);
     activeRef.current = true;
     setJob({ status: "running", summary: null, connections: [], current: null, startedAt: Date.now(), finished: false });
     try {
@@ -281,19 +301,13 @@ export default function ModelSyncPanel({
     pollSnapshot(jobId);
   }, [base, job?.jobId, pollSnapshot]);
 
-  const handleClear = useCallback(async () => {
-    if (activeRef.current) return;
-    if (typeof window !== "undefined" && !window.confirm("Remove all synced models for this provider? Manually added models are kept.")) return;
-    try {
-      const res = await fetch(`${base}${storageQuery}`, { method: "DELETE" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "Clear failed");
-      refreshStatus(true);
-      onCatalogChangedRef.current?.();
-    } catch (e) {
-      setError(e.message);
-    }
-  }, [base, storageQuery, refreshStatus]);
+  // NOTE: the "Clear All Models" button and its handler were removed from this
+  // panel. The button was destructive and misleadingly named — it only cleared
+  // the synced catalog while leaving added models untouched — and it sat among
+  // the ON/OFF toggles where it read like one of them. Individual model
+  // removal stays available on each row of the Added models list, and
+  // `DELETE /api/providers/[id]/sync-models` remains available for scripted
+  // use; the Undo-free bulk path is deliberately not offered in the UI.
 
   const toggleSetting = useCallback(async (key) => {
     const next = !settings[key];
@@ -324,6 +338,39 @@ export default function ModelSyncPanel({
       if (data.settings) setSettings((s) => ({ ...s, ...data.settings }));
     } catch { /* keep optimistic value */ }
   }, [base]);
+
+  // ── Auto-Add policy dropdown positioning ─────────────────────────
+  // Rendered through a PORTAL at <body> level with FIXED coordinates computed
+  // from the toggle button's rect. Root cause of the old overlap bug: an
+  // `absolute z-50` menu inside the panel card got clipped by ancestor
+  // `overflow` rules and painted UNDER sibling provider cards — those cards
+  // create their own stacking contexts (borders/opacity/hover), so no local
+  // z-index could ever win. A body-level portal escapes every ancestor
+  // stacking context and overflow clip at once — not a z-index arms race.
+  const [menuPos, setMenuPos] = useState(null); // { top, left, maxHeight } | null
+  useLayoutEffectForMenu(showAutoAddMenu, autoAddAnchorRef, setMenuPos);
+
+  // Close on Escape and on scroll/resize (fixed position does not follow the
+  // anchor); outside mousedown is handled by the portal backdrop.
+  useEffect(() => {
+    if (!showAutoAddMenu) return;
+    const onKeyDown = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setShowAutoAddMenu(false);
+        autoAddAnchorRef.current?.focus?.();
+      }
+    };
+    const onReposition = () => setShowAutoAddMenu(false);
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("resize", onReposition);
+    window.addEventListener("scroll", onReposition, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("resize", onReposition);
+      window.removeEventListener("scroll", onReposition, true);
+    };
+  }, [showAutoAddMenu]);
 
   const activeConnections = (connections || []).filter((c) => c.isActive !== false);
   // Credential-free providers (opencode, local-device, local TTS, searxng) are
@@ -395,35 +442,70 @@ export default function ModelSyncPanel({
               Auto-Add Models
             </button>
             <button
+              ref={autoAddAnchorRef}
               onClick={() => setShowAutoAddMenu((v) => !v)}
               className="pl-1 text-text-muted hover:text-primary"
               title="Auto-Add policy settings"
               aria-label="Auto-Add policy settings"
+              aria-haspopup="menu"
+              aria-expanded={showAutoAddMenu}
             >
-              <span className="material-symbols-outlined text-sm">expand_more</span>
+              <span className={`material-symbols-outlined text-sm transition-transform ${showAutoAddMenu ? "rotate-180" : ""}`}>expand_more</span>
             </button>
           </div>
-          {showAutoAddMenu && (
+          {showAutoAddMenu && menuPos && createPortal(
             <>
-              <div className="fixed inset-0 z-40" onClick={() => setShowAutoAddMenu(false)} />
-              <div className="absolute z-50 mt-1 w-72 rounded-xl border border-border bg-background p-3 shadow-lg">
-                <p className="text-[11px] font-semibold text-text-main mb-2">
-                  Auto-Add policy ({AUTO_ADD_POLICY_LABELS[normalizeAutoAddPolicy(settings.autoAddPolicy)]})
-                </p>
-                <div className="flex flex-col gap-1.5">
-                  {AUTO_ADD_POLICIES.map((p) => (
-                    <button
-                      key={p}
-                      onClick={() => setAutoAddPolicy(p)}
-                      className={`text-left px-2 py-1.5 rounded-lg border text-[11px] transition-colors ${normalizeAutoAddPolicy(settings.autoAddPolicy) === p ? "border-primary text-primary bg-primary/5" : "border-border text-text-muted hover:text-text-main"}`}
-                    >
-                      <span className="font-medium block">{AUTO_ADD_POLICY_LABELS[p]}</span>
-                      <span className="opacity-80">{AUTO_ADD_POLICY_DESCRIPTIONS[p]}</span>
-                    </button>
-                  ))}
+              {/* Full-viewport backdrop: catches outside clicks at ANY depth
+                  (sibling cards, page shell) and closes the menu. */}
+              <div
+                className="fixed inset-0"
+                style={{ zIndex: 90 }}
+                onMouseDown={() => setShowAutoAddMenu(false)}
+                aria-hidden="true"
+              />
+              <div
+                ref={autoAddMenuRef}
+                role="menu"
+                aria-label="Auto-Add policy"
+                className="fixed w-80 max-w-[calc(100vw-1rem)] rounded-xl border border-border bg-background shadow-xl"
+                style={{
+                  zIndex: 91,
+                  top: menuPos.top,
+                  left: menuPos.left,
+                  maxHeight: menuPos.maxHeight,
+                  overflowY: "auto",
+                }}
+              >
+                <div className="sticky top-0 bg-background px-3 pt-3 pb-2 border-b border-border/60">
+                  <p className="text-[11px] font-semibold text-text-main">
+                    Auto-Add policy
+                  </p>
+                  <p className="text-[10px] text-text-muted mt-0.5">
+                    Currently: {AUTO_ADD_POLICY_LABELS[normalizeAutoAddPolicy(settings.autoAddPolicy)]}
+                  </p>
+                </div>
+                <div className="flex flex-col gap-1 p-2">
+                  {AUTO_ADD_POLICIES.map((p) => {
+                    const selected = normalizeAutoAddPolicy(settings.autoAddPolicy) === p;
+                    return (
+                      <button
+                        key={p}
+                        role="menuitemradio"
+                        aria-checked={selected}
+                        onClick={() => setAutoAddPolicy(p)}
+                        className={`text-left px-2.5 py-2 rounded-lg border text-[11px] transition-colors ${selected ? "border-primary text-primary bg-primary/5" : "border-transparent text-text-muted hover:text-text-main hover:bg-sidebar"}`}
+                      >
+                        <span className="font-medium flex items-center gap-1.5">
+                          {selected && <span className="material-symbols-outlined text-[13px]">check</span>}
+                          {AUTO_ADD_POLICY_LABELS[p]}
+                        </span>
+                        <span className="block opacity-80 mt-0.5">{AUTO_ADD_POLICY_DESCRIPTIONS[p]}</span>
+                      </button>
+                    );
+                  })}
                 </div>
                 <label
-                  className="flex items-start gap-1.5 mt-2 text-[11px] text-text-muted cursor-pointer"
+                  className="flex items-start gap-1.5 px-3 pb-2 text-[11px] text-text-muted cursor-pointer"
                   title="Off by default. When on, discovered models with no test result are also added as working models."
                 >
                   <input
@@ -434,29 +516,30 @@ export default function ModelSyncPanel({
                   />
                   <span>Also add untested models <span className="opacity-70">(off by default)</span></span>
                 </label>
-                <p className="text-[10px] text-text-muted mt-2">
+                <p className="px-3 pb-3 text-[10px] text-text-muted">
                   Applies after each sync using the latest test results. Never duplicates, never re-enables manually disabled models.
                 </p>
               </div>
-            </>
+            </>,
+            document.body
           )}
         </div>
-        <button
-          onClick={handleClear}
-          disabled={running}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border border-red-500/40 text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40"
-          title="Remove synced models (manual models are kept)"
-        >
-          <span className="material-symbols-outlined text-sm">delete</span>
-          Clear All Models
-        </button>
+        {/* NOTE: "Clear All Models" was intentionally removed. It was a
+            destructive, ambiguously-named action (it only cleared the synced
+            catalog while leaving added models in place), and it sat next to the
+            other ON/OFF controls where it read like a normal toggle. Removal of
+            a single model remains available on its row in the Added models
+            list, and stale upstream entries drop out of the discovered catalog
+            on the next sync. */}
         <span className="text-[11px] text-text-muted ml-auto">
           Synced: {status.syncedCount}{status.staleCount > 0 && ` (${status.staleCount} stale)`} · Last sync: {formatTime(settings.lastSyncAt)}
         </span>
       </div>
 
       <p className="text-[11px] text-text-muted">
-        {providerLabel || providerId} — sync upstream models, then add the ones you need. Manual models are never removed by sync.
+        {providerLabel || providerId} — sync upstream models, then add the ones you
+        need. Added models, manual models and disabled models are never removed by
+        a sync, and a failed or empty upstream leaves the catalog untouched.
       </p>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -482,10 +565,23 @@ export default function ModelSyncPanel({
       )}
 
       {job?.finished && summary && (
-        <p className="text-[11px] text-text-muted">
-          Finished in {formatElapsed(job.elapsedMs)} — {summary.discovered} discovered, {summary.added} added, {summary.updated} updated
-          {summary.stale > 0 && `, ${summary.stale} stale`}{summary.failed > 0 && `, ${summary.failed} failed`}.
-        </p>
+        <div className="text-[11px] text-text-muted">
+          <p>
+            Finished in {formatElapsed(job.elapsedMs)} — {summary.discovered} discovered, {summary.added} added, {summary.updated} updated
+            {summary.stale > 0 && `, ${summary.stale} stale`}{summary.failed > 0 && `, ${summary.failed} failed`}.
+          </p>
+          {summary.partial && (
+            <p className="text-amber-600 dark:text-amber-400">
+              Partial sync: {summary.failed} connection(s) failed, so the catalog reflects only the
+              connections that answered. Models already added were kept.
+            </p>
+          )}
+          {summary.preserved > 0 && (
+            <p className="text-amber-600 dark:text-amber-400">
+              Nothing was changed — {summary.preserved} existing model(s) preserved.
+            </p>
+          )}
+        </div>
       )}
       {autoAddSummary && (
         <p className="text-[11px] text-text-muted">
@@ -506,20 +602,44 @@ export default function ModelSyncPanel({
 
       {/* Discovered upstream catalog — strictly separate from added models.
           Added/manual/built-in models render in the Added list; only
-          not-yet-added discoveries appear here. */}
-      <DiscoveredModelsSection
-        catalog={catalog}
-        storageAlias={providerStorageAlias}
-        modelAliases={modelAliases}
-        hardcodedIds={hardcodedIds}
-        testResults={testResults}
-        disabledIds={disabledIds}
-        onAddOne={onAddModel}
-        onChanged={() => {
-          refreshStatus(true);
-          onCatalogChangedRef.current?.();
-        }}
-      />
+          not-yet-added discoveries appear here. The panel is collapsible: it
+          opens on Sync now (and after a reload when a catalog exists) and its
+          Close button only hides it. */}
+      {panelOpen ? (
+        <DiscoveredModelsSection
+          catalog={catalog}
+          storageAlias={providerStorageAlias}
+          modelAliases={modelAliases}
+          hardcodedIds={hardcodedIds}
+          testResults={testResults}
+          disabledIds={disabledIds}
+          canTest={canSync}
+          onAddOne={onAddModel}
+          onTestResult={(modelId, status) => onTestResult?.(modelId, status)}
+          onClose={() => setPanelOpen(false)}
+          onChanged={() => {
+            refreshStatus(true);
+            onCatalogChangedRef.current?.();
+          }}
+        />
+      ) : (
+        <div className="w-full mt-1 flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setPanelOpen(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border border-border text-text-muted transition-colors hover:border-primary/40 hover:text-primary"
+            title="Show the discovered models from the last sync"
+          >
+            <span className="material-symbols-outlined text-sm">travel_explore</span>
+            Show discovered models
+            {status.syncedCount > 0 && (
+              <span className="text-[10px] bg-sidebar px-1.5 py-0.5 rounded-full">{status.syncedCount}</span>
+            )}
+          </button>
+          {running && (
+            <span className="text-[11px] text-text-muted">Syncing…</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -539,6 +659,45 @@ function useManualIds(modelAliases, providerStorageAlias) {
   }, [modelAliases, providerStorageAlias]);
 }
 
+// Position the Auto-Add policy menu under its toggle button using a portal +
+// fixed coordinates. Flips ABOVE the anchor when there is no room below,
+// clamps to the viewport, and caps the height so the menu scrolls instead of
+// overflowing. Runs in useLayoutEffect so the menu never paints at (0,0).
+function useLayoutEffectForMenu(open, anchorRef, setMenuPos) {
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuPos(null);
+      return;
+    }
+    const compute = () => {
+      const rect = anchorRef.current?.getBoundingClientRect?.();
+      if (!rect) return;
+      const margin = 8;
+      const viewportW = window.innerWidth;
+      const viewportH = window.innerHeight;
+      // Estimate menu height before it is measured; clamped by maxHeight anyway.
+      const estimatedH = Math.min(420, viewportH - margin * 2);
+      const spaceBelow = viewportH - rect.bottom - margin;
+      const openUp = spaceBelow < Math.min(estimatedH, 240) && rect.top > estimatedH;
+      const top = openUp
+        ? Math.max(margin, rect.top - estimatedH - 6)
+        : rect.bottom + 6;
+      const left = Math.min(
+        Math.max(margin, rect.right - 320), // right-align to the toggle (menu ≈ 320px)
+        Math.max(margin, viewportW - 320 - margin)
+      );
+      const maxHeight = openUp
+        ? Math.min(420, rect.top - margin * 2)
+        : Math.min(420, viewportH - rect.bottom - margin * 2);
+      setMenuPos({ top, left, maxHeight: Math.max(180, maxHeight) });
+    };
+    compute();
+    // Re-measure once the menu has rendered (real height may differ).
+    const raf = requestAnimationFrame(compute);
+    return () => cancelAnimationFrame(raf);
+  }, [open, anchorRef, setMenuPos]);
+}
+
 ModelSyncPanel.propTypes = {
   providerId: PropTypes.string.isRequired,
   providerStorageAlias: PropTypes.string.isRequired,
@@ -548,6 +707,8 @@ ModelSyncPanel.propTypes = {
   hardcodedIds: PropTypes.array,
   testResults: PropTypes.object,
   disabledIds: PropTypes.array,
+  isCustomProvider: PropTypes.bool,
   onAddModel: PropTypes.func.isRequired,
+  onTestResult: PropTypes.func,
   onCatalogChanged: PropTypes.func,
 };

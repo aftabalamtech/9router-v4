@@ -2,6 +2,7 @@ import { BaseExecutor } from "./base.js";
 import { PROVIDERS } from "../config/providers.js";
 import { OAUTH_ENDPOINTS, buildKimiHeaders } from "../config/appConstants.js";
 import { buildClineHeaders } from "../../src/shared/utils/clineAuth.js";
+import { buildCompatibleChatUrl, buildCompatibleEmbeddingsUrl } from "../../src/lib/net/compatibleUrl.js";
 import { getCachedClaudeHeaders } from "../utils/claudeHeaderCache.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
@@ -117,16 +118,29 @@ export class DefaultExecutor extends BaseExecutor {
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
+    // Custom providers share one URL builder (lib/net/compatibleUrl.js). It
+    // strips a pasted `/chat/completions` / `/models` / `/messages` suffix, so
+    // a user who stores the full endpoint no longer gets a doubled path like
+    // `.../v1/chat/completions/chat/completions`. It also never appends `/v1`
+    // (self-hosted gateways legitimately live at the root).
     if (this.provider?.startsWith?.("openai-compatible-")) {
-      const baseUrl = credentials?.providerSpecificData?.baseUrl || "https://api.openai.com/v1";
-      const normalized = baseUrl.replace(/\/$/, "");
-      const path = this.provider.includes("responses") ? "/responses" : "/chat/completions";
-      return `${normalized}${path}`;
+      return (
+        buildCompatibleChatUrl(
+          credentials?.providerSpecificData?.baseUrl,
+          this.provider
+        ) || "https://api.openai.com/v1/chat/completions"
+      );
     }
     if (this.provider?.startsWith?.("anthropic-compatible-")) {
-      const baseUrl = credentials?.providerSpecificData?.baseUrl || "https://api.anthropic.com/v1";
-      const normalized = baseUrl.replace(/\/$/, "");
-      return `${normalized}/messages`;
+      return (
+        buildCompatibleChatUrl(
+          credentials?.providerSpecificData?.baseUrl,
+          this.provider
+        ) || "https://api.anthropic.com/v1/messages"
+      );
+    }
+    if (this.provider?.startsWith?.("custom-embedding-")) {
+      return buildCompatibleEmbeddingsUrl(credentials?.providerSpecificData?.baseUrl);
     }
     switch (this.provider) {
       case "claude":

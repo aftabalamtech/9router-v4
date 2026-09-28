@@ -25,7 +25,10 @@ function mapRow(row) {
   return mapped;
 }
 
-function convertPlaceholders(sql) {
+// Exported for tests: converts sqlite-style `?` placeholders to PostgreSQL
+// `$n` while correctly skipping `?` inside strings, quoted identifiers,
+// comments and dollar-quoted bodies.
+export function convertPlaceholders(sql) {
   let result = "";
   let index = 0;
   let mode = "normal";
@@ -143,7 +146,16 @@ async function syncSchema(client) {
 }
 
 export async function createPostgresAdapter(connectionString) {
-  const pool = new Pool({ connectionString });
+  let pool;
+  try {
+    pool = new Pool({ connectionString });
+  } catch (error) {
+    throw new Error(
+      `[DB] Invalid PostgreSQL connection string (DATABASE_URL). ` +
+      `Expected format: postgresql://USER:PASSWORD@HOST:5432/DBNAME. ` +
+      `Underlying error: ${error?.message || error}`
+    );
+  }
   pool.on("error", (error) => console.error("[DB] PostgreSQL pool error:", error));
 
   let bootstrapClient;
@@ -220,7 +232,15 @@ export async function createPostgresAdapter(connectionString) {
         await client.query("COMMIT");
         return value;
       } catch (error) {
-        await client.query("ROLLBACK");
+        // A failed statement aborts the PG transaction; ROLLBACK can itself
+        // fail (connection drop, pool destroy). Swallowing that secondary
+        // error preserves the ORIGINAL error for the caller — the old code
+        // let the rollback failure mask the real cause.
+        try {
+          await client.query("ROLLBACK");
+        } catch (rollbackError) {
+          console.error("[DB] PostgreSQL ROLLBACK failed:", rollbackError?.message || rollbackError);
+        }
         throw error;
       } finally {
         client.release();

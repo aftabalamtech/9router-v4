@@ -21,6 +21,9 @@ import AddCustomModelModal from "./AddCustomModelModal";
 import LeonardoAdminPanel from "./LeonardoAdminPanel";
 import ModelBatchTest from "../components/ModelBatchTest";
 import ModelSyncPanel from "./ModelSyncPanel";
+import DisabledModelsSection from "./DisabledModelsSection";
+import BulkAddConnectionsModal from "./BulkAddConnectionsModal";
+import { getProviderDisplayName, getCustomProviderVisuals } from "@/shared/utils/providerNaming";
 
 const ONE_BY_ONE_DELAY_MS = 1000;
 
@@ -73,6 +76,7 @@ export default function ProviderDetailPage() {
   const stopOneByOneRef = useRef(false);
   const [importingQoderModels, setImportingQoderModels] = useState(false);
   const [providerTab, setProviderTab] = useState("overview"); // overview | admin
+  const [showBulkAddModal, setShowBulkAddModal] = useState(false);
   const { copied, copy } = useCopyToClipboard();
 
   const AG_RISK_STORAGE_KEY = "ag_risk_confirmed";
@@ -122,14 +126,18 @@ export default function ProviderDetailPage() {
     triggerApiKeyConnection();
   };
 
+  // Custom-provider label: the CONFIGURED node name ("Xkiro"). Falls through
+  // the node record, then a connection's nodeName, then a generic type label —
+  // never the opaque `openai-compatible-chat-<uuid>` node id.
+  const customProviderName = getProviderDisplayName(providerId, { node: providerNode });
   const providerInfo = providerNode
     ? {
+        ...getCustomProviderVisuals(providerId, providerNode),
         id: providerNode.id,
-        name: providerNode.name || (providerNode.type === "anthropic-compatible" ? "Anthropic Compatible" : "OpenAI Compatible"),
-        color: providerNode.type === "anthropic-compatible" ? "#D97757" : "#10A37F",
-        textIcon: providerNode.type === "anthropic-compatible" ? "AC" : "OC",
+        name: customProviderName,
         apiType: providerNode.apiType,
         baseUrl: providerNode.baseUrl,
+        prefix: providerNode.prefix,
         type: providerNode.type,
       }
     : (OAUTH_PROVIDERS[providerId] || APIKEY_PROVIDERS[providerId] || FREE_PROVIDERS[providerId] || FREE_TIER_PROVIDERS[providerId] || WEB_COOKIE_PROVIDERS[providerId]);
@@ -1414,14 +1422,31 @@ export default function ProviderDetailPage() {
       {/* Overview Tab (or always for non-Leonardo) */}
       {(providerId !== "leonardo" || providerTab === "overview") && (
       <>
+      {/* Models: header + configuration */}
       {isCompatible && providerNode && (
         <Card>
-          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="min-w-0">
-              <h2 className="text-lg font-semibold">{isAnthropicCompatible ? "Anthropic Compatible Details" : "OpenAI Compatible Details"}</h2>
+              <h2 className="text-lg font-semibold">Provider Configuration</h2>
+              {/* The configured name, not the generic type label. */}
               <p className="break-all text-sm text-text-muted">
-                {isAnthropicCompatible ? "Messages API" : (providerNode.apiType === "responses" ? "Responses API" : "Chat Completions")} · {(providerNode.baseUrl || "").replace(/\/$/, "")}/
-                {isAnthropicCompatible ? "messages" : (providerNode.apiType === "responses" ? "responses" : "chat/completions")}
+                {providerInfo.name} ·{" "}
+                <span className="opacity-80">
+                  {isAnthropicCompatible
+                    ? "Anthropic-compatible · Messages API"
+                    : `OpenAI-compatible · ${providerNode.apiType === "responses" ? "Responses API" : "Chat Completions"}`}
+                </span>
+              </p>
+              <p className="mt-1 break-all text-xs text-text-muted/80">
+                <span className="opacity-70">Base URL</span>{" "}
+                <code className="font-mono">{providerNode.baseUrl || "—"}</code>
+                {providerNode.prefix && (
+                  <>
+                    {" · "}
+                    <span className="opacity-70">Prefix</span>{" "}
+                    <code className="font-mono">{providerNode.prefix}</code>
+                  </>
+                )}
               </p>
             </div>
             <div className="grid grid-cols-1 gap-2 sm:flex sm:items-center">
@@ -1434,7 +1459,17 @@ export default function ProviderDetailPage() {
                 }}
                 className="w-full sm:w-auto"
               >
-                Add API Key
+                Add Connection
+              </Button>
+              <Button
+                size="sm"
+                variant="secondary"
+                icon="download"
+                onClick={() => { setAddConnectionError(""); setShowBulkAddModal(true); }}
+                title="Paste many API keys and create one connection per key"
+                className="w-full sm:w-auto"
+              >
+                Bulk Add
               </Button>
               <Button
                 size="sm"
@@ -1449,10 +1484,10 @@ export default function ProviderDetailPage() {
                 size="sm"
                 variant="secondary"
                 icon="delete"
-                onClick={async () => {
+                onClick={() => {
                   setConfirmState({
-                    title: "Delete Compatible Node",
-                    message: `Delete this ${isAnthropicCompatible ? "Anthropic" : "OpenAI"} Compatible node?`,
+                    title: "Delete Provider",
+                    message: `Delete "${providerInfo.name}" and all of its connections and models?`,
                     onConfirm: async () => {
                       setConfirmState(null);
                       try {
@@ -1481,8 +1516,13 @@ export default function ProviderDetailPage() {
       ) : (
         <Card>
           <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <h2 className="text-lg font-semibold">Connections</h2>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
+            <h2 className="text-lg font-semibold">
+              Connections
+              {connections.length > 0 && (
+                <span className="ml-2 text-[11px] font-normal text-text-muted">{connections.length}</span>
+              )}
+            </h2>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-2">
               {connections.length > 0 && proxyPools.length > 0 && (
                 <Button
                   size="sm"
@@ -1501,8 +1541,18 @@ export default function ProviderDetailPage() {
                     icon="sync"
                     onClick={handleRunOneByOneTest}
                     disabled={oneByOneRunning}
+                    title="Test every connection sequentially and record the result on each"
                   >
-                    {oneByOneRunning ? "Testing Connection One-by-One..." : "Test Connection One-by-One"}
+                    {oneByOneRunning ? "Testing One-by-One..." : "Test One-by-One"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon="download"
+                    onClick={() => { setAddConnectionError(""); setShowBulkAddModal(true); }}
+                    title="Paste many API keys and create one connection per key"
+                  >
+                    Bulk Add
                   </Button>
                   {oneByOneRunning && (
                     <Button
@@ -1593,7 +1643,16 @@ export default function ProviderDetailPage() {
                       icon="add"
                       onClick={triggerAddConnection}
                     >
-                      {isCompatible ? "Add API Key" : (providerId === "iflow" ? "OAuth" : "Add Connection")}
+                      {isCompatible ? "Add Connection" : (providerId === "iflow" ? "OAuth" : "Add Connection")}
+                    </Button>
+                    <Button
+                      size="sm"
+                      icon="download"
+                      variant="secondary"
+                      onClick={() => { setAddConnectionError(""); setShowBulkAddModal(true); }}
+                      title="Paste many API keys and create one connection per key"
+                    >
+                      Bulk Add
                     </Button>
                   </>
                 )}
@@ -1676,63 +1735,75 @@ export default function ProviderDetailPage() {
               )}
 
               {connectionsList}
-              {!isCompatible && (
-                <div className="mt-4 grid grid-cols-1 gap-2 sm:flex">
-                  {providerId === "iflow" && (
+              <div className="mt-4 grid grid-cols-1 gap-2 sm:flex">
+                {providerId === "iflow" && !isCompatible && (
+                  <Button
+                    size="sm"
+                    icon="cookie"
+                    variant="secondary"
+                    onClick={() => setShowIFlowCookieModal(true)}
+                    title="Add connection using browser cookie"
+                    className="w-full sm:w-auto"
+                  >
+                    Cookie
+                  </Button>
+                )}
+                {hasDualAuthModes ? (
+                  <>
                     <Button
                       size="sm"
-                      icon="cookie"
+                      icon="lock"
                       variant="secondary"
-                      onClick={() => setShowIFlowCookieModal(true)}
-                      title="Add connection using browser cookie"
+                      onClick={triggerOAuthConnection}
                       className="w-full sm:w-auto"
                     >
-                      Cookie
+                      {oauthConnectionLabel}
                     </Button>
-                  )}
-                  {hasDualAuthModes ? (
-                    <>
-                      <Button
-                        size="sm"
-                        icon="lock"
-                        variant="secondary"
-                        onClick={triggerOAuthConnection}
-                        className="w-full sm:w-auto"
-                      >
-                        {oauthConnectionLabel}
-                      </Button>
-                      <Button
-                        size="sm"
-                        icon="key"
-                        onClick={triggerApiKeyConnection}
-                        className="w-full sm:w-auto"
-                      >
-                        {apiKeyConnectionLabel}
-                      </Button>
-                    </>
-                  ) : (
+                    <Button
+                      size="sm"
+                      icon="key"
+                      onClick={triggerApiKeyConnection}
+                      className="w-full sm:w-auto"
+                    >
+                      {apiKeyConnectionLabel}
+                    </Button>
+                  </>
+                ) : (
+                  <>
                     <Button
                       size="sm"
                       icon="add"
                       onClick={triggerAddConnection}
                       className="w-full sm:w-auto"
                     >
-                      Add
+                      Add Connection
                     </Button>
-                  )}
-                </div>
-              )}
+                    <Button
+                      size="sm"
+                      icon="download"
+                      variant="secondary"
+                      onClick={() => { setAddConnectionError(""); setShowBulkAddModal(true); }}
+                      title="Paste many API keys and create one connection per key"
+                      className="w-full sm:w-auto"
+                    >
+                      Bulk Add
+                    </Button>
+                  </>
+                )}
+              </div>
             </>
           )}
         </Card>
       )}
 
 
-      {/* Models */}
+      {/* Models — Added models (what the gateway routes) and, inside the sync
+          panel, the Discovered models (what upstream offers but is not added
+          yet). They are deliberately separate lists. */}
       <Card>
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-lg font-semibold">
-            {"Available Models"}
+            {isCompatible ? "Added Models" : "Available Models"}
           </h2>
           {!isCompatible && (() => {
             const _providerServiceKinds = AI_PROVIDERS[providerId]?.serviceKinds || ["llm"];
@@ -1774,11 +1845,37 @@ export default function ProviderDetailPage() {
           hardcodedIds={models.map((m) => m.id)}
           testResults={modelTestResults}
           disabledIds={disabledModelIds}
+          isCustomProvider={isCompatible}
           onAddModel={(modelId) => handleSetAlias(modelId, modelId.split("/").pop(), providerStorageAlias)}
+          onTestResult={(modelId, status) =>
+            setModelTestResults((prev) => (prev[modelId] === status ? prev : { ...prev, [modelId]: status }))
+          }
           onCatalogChanged={() => { fetchAliases(); fetchSyncedModels(providerStorageAlias); fetchDisabledModels(); }}
         />
         {renderModelsSection()}
+
+        {/* Dedicated Disabled models section (custom providers included).
+            State lives in the shared disabledModels store keyed by the
+            provider's storage alias, so this list and the Added list never
+            show the same model twice. */}
+        <DisabledModelsSection
+          disabledIds={disabledModelIds}
+          providerName={customProviderName}
+          catalog={syncedModels}
+          testResults={modelTestResults}
+          modelAliases={modelAliases}
+          onEnable={handleEnableModel}
+          onEnableAll={handleEnableAll}
+        />
       </Card>
+
+      <BulkAddConnectionsModal
+        isOpen={showBulkAddModal}
+        provider={providerId}
+        providerName={customProviderName}
+        onClose={() => setShowBulkAddModal(false)}
+        onDone={async () => { await fetchConnections(); invalidateCache("/api/providers"); }}
+      />
 
       {bulkActionModal}
       </>

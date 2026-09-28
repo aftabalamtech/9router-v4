@@ -181,8 +181,19 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   return (
     <Modal isOpen={isOpen} title="Edit Connection" onClose={onClose}>
       <div className="flex flex-col gap-4">
+        {isCompatible && (
+          <p className="text-[11px] text-text-muted">
+            This connection belongs to{" "}
+            <span className="font-medium text-text-main">
+              {connection?.providerSpecificData?.nodeName || connection?.providerName || connection?.provider}
+            </span>
+            . Editing here changes only this connection — its name, key and
+            settings. The provider&apos;s base URL and prefix are shared, and are
+            edited via &quot;Edit&quot; on the provider configuration card.
+          </p>
+        )}
         <Input
-          label="Name"
+          label="Connection name"
           value={formData.name}
           onChange={(e) => setFormData({ ...formData, name: e.target.value })}
           placeholder={isOAuth ? "Account name" : "Production Key"}
@@ -248,7 +259,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
                 value={formData.apiKey}
                 onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
                 placeholder="Enter new API key"
-                hint="Leave blank to keep the current API key."
+                hint="Leave blank to keep this connection's current key. Stored keys are never sent to the browser."
                 className="flex-1"
               />
               <div className="pt-6">

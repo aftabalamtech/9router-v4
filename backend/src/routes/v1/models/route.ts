@@ -10,6 +10,8 @@ import { getDisabledModels } from "../../../lib/disabledModelsDb.js";
 import { resolveKiroModels } from "../../../../open-sse/services/kiroModels.js";
 import { resolveQoderModels } from "../../../../open-sse/services/qoderModels.js";
 import { fetchWithTimeout } from "../../../lib/net/fetchWithTimeout.js";
+import { normalizeCompatibleBaseUrl } from "../../../lib/net/compatibleUrl.js";
+import { readResponseOnce } from "../../../lib/net/httpBody.js";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -77,30 +79,29 @@ function inferKindFromUnknownModelId(modelId) {
 }
 
 async function fetchCompatibleModelIds(connection) {
-  if (!connection?.apiKey) return [];
-
+  // The API key is OPTIONAL for custom providers: self-hosted and
+  // keyless-but-proxying gateways are common, and bailing out here is why such
+  // providers showed an empty /v1/models list despite a working endpoint.
   const baseUrl = typeof connection?.providerSpecificData?.baseUrl === "string"
-    ? connection.providerSpecificData.baseUrl.trim().replace(/\/$/, "")
+    ? normalizeCompatibleBaseUrl(connection.providerSpecificData.baseUrl)
     : "";
 
   if (!baseUrl) return [];
 
-  let url = `${baseUrl}/models`;
+  const url = `${baseUrl}/models`;
   const headers = {
     "Content-Type": "application/json",
   };
+  const key = connection?.apiKey || connection?.accessToken;
 
   if (isOpenAICompatibleProvider(connection.provider)) {
-    headers.Authorization = `Bearer ${connection.apiKey}`;
+    if (key) headers.Authorization = `Bearer ${key}`;
   } else if (isAnthropicCompatibleProvider(connection.provider)) {
-    if (url.endsWith("/messages/models")) {
-      url = url.slice(0, -9);
-    } else if (url.endsWith("/messages")) {
-      url = `${url.slice(0, -9)}/models`;
+    if (key) {
+      headers["x-api-key"] = key;
+      headers["anthropic-version"] = "2023-06-01";
+      headers.Authorization = `Bearer ${key}`;
     }
-    headers["x-api-key"] = connection.apiKey;
-    headers["anthropic-version"] = "2023-06-01";
-    headers.Authorization = `Bearer ${connection.apiKey}`;
   } else {
     return [];
   }
@@ -115,16 +116,19 @@ async function fetchCompatibleModelIds(connection) {
       timeoutMs: 5000,
     });
 
-    if (!response.ok) return [];
+    // Single read: a non-JSON body (proxy error page, HTML 200) must not
+    // leave the stream consumed and then throw on the next read.
+    const body = await readResponseOnce(response);
+    if (!body.okStatus || !body.parsed) return [];
 
-    const data = await response.json();
-    const rawModels = parseOpenAIStyleModels(data);
+    const rawModels = parseOpenAIStyleModels(body.json);
 
     return Array.from(
       new Set(
         rawModels
-          .map((model) => model?.id || model?.name || model?.model)
+          .map((model) => (typeof model === "string" ? model : model?.id || model?.model || model?.slug || model?.name))
           .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "")
+          .map((modelId) => modelId.trim())
       )
     );
   } catch {
@@ -267,6 +271,13 @@ export async function buildModelsList(kindFilter) {
         || getProviderAlias(providerId)
         || staticAlias
       ).trim();
+      // Display label, distinct from the routing alias: clients show this, and
+      // for a custom provider it must be the name the user configured.
+      const ownedByLabel = (
+        conn?.providerSpecificData?.nodeName
+        || AI_PROVIDERS[providerId]?.name
+        || outputAlias
+      ).trim();
       const providerModels = PROVIDER_MODELS[staticAlias] || [];
       const enabledModels = conn?.providerSpecificData?.enabledModels;
       const hasExplicitEnabledModels =
@@ -367,7 +378,10 @@ export async function buildModelsList(kindFilter) {
         models.push({
           id: `${outputAlias}/${modelId}`,
           object: "model",
-          owned_by: outputAlias,
+          // `owned_by` is the provider label clients display next to a model.
+          // For a custom provider that must be the CONFIGURED name (e.g.
+          // "Xkiro"), not the opaque node id used as the routing alias.
+          owned_by: ownedByLabel,
         });
       }
 
@@ -389,7 +403,7 @@ export async function buildModelsList(kindFilter) {
         models.push({
           id: `${outputAlias}/${subId}`,
           object: "model",
-          owned_by: outputAlias,
+          owned_by: ownedByLabel,
         });
       }
 
@@ -399,7 +413,7 @@ export async function buildModelsList(kindFilter) {
           id: `${outputAlias}/search`,
           object: "model",
           kind: "webSearch",
-          owned_by: outputAlias,
+          owned_by: ownedByLabel,
         });
       }
       if (kindFilter.includes("webFetch") && providerInfo?.fetchConfig) {
@@ -407,7 +421,7 @@ export async function buildModelsList(kindFilter) {
           id: `${outputAlias}/fetch`,
           object: "model",
           kind: "webFetch",
-          owned_by: outputAlias,
+          owned_by: ownedByLabel,
         });
       }
     }

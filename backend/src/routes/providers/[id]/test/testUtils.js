@@ -19,6 +19,7 @@ import {
   KILOCODE_CONFIG,
 } from "@/lib/oauth/constants/oauth";
 import { buildClineHeaders } from "@/shared/utils/clineAuth";
+import { buildCompatibleChatUrl, buildCompatibleModelsUrl } from "@/lib/net/compatibleUrl";
 
 async function readResponseError(response) {
   const text = await response.text().catch(() => "");
@@ -29,6 +30,24 @@ async function readResponseError(response) {
   } catch {
     return text;
   }
+}
+
+// Auth headers for a custom provider. The API key is optional (self-hosted
+// gateways are frequently unauthenticated), so the header is omitted entirely
+// rather than sent as an empty "Bearer " — an empty Bearer header is rejected
+// by some gateways and leaks into error text on others.
+function buildCompatibleAuthHeaders(connection, isAnthropic) {
+  const key = connection.apiKey || connection.accessToken;
+  const headers = { "Content-Type": "application/json" };
+  if (!key) return headers;
+  if (isAnthropic) {
+    headers["x-api-key"] = key;
+    headers["anthropic-version"] = "2023-06-01";
+    headers["Authorization"] = `Bearer ${key}`;
+  } else {
+    headers["Authorization"] = `Bearer ${key}`;
+  }
+  return headers;
 }
 
 function isAuthFailure(status) {
@@ -372,21 +391,35 @@ async function fetchWithConnectionProxy(url, options = {}, effectiveProxy = null
 }
 
 async function testApiKeyConnection(connection, effectiveProxy = null) {
-  if (isOpenAICompatibleProvider(connection.provider)) {
-    const modelsBase = connection.providerSpecificData?.baseUrl;
-    if (!modelsBase) return { valid: false, error: "Missing base URL" };
+  // Custom (OpenAI/Anthropic-compatible) providers share ONE code path. The
+  // base URL is normalized centrally (lib/net/compatibleUrl.js) so a stored
+  // `https://host/v1/chat/completions` no longer produces
+  // `.../chat/completions/models` here while chat used a different URL.
+  if (isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider)) {
+    const isAnthropic = isAnthropicCompatibleProvider(connection.provider);
+    const modelsUrl = buildCompatibleModelsUrl(
+      connection.providerSpecificData?.baseUrl,
+      connection.provider
+    );
+    if (!modelsUrl) return { valid: false, error: "Missing or invalid base URL" };
     try {
-      const baseUrl = modelsBase.replace(/\/$/, "");
-      const modelsRes = await fetchWithConnectionProxy(`${baseUrl}/models`, {
-        headers: { "Authorization": `Bearer ${connection.apiKey}` },
+      const modelsRes = await fetchWithConnectionProxy(modelsUrl, {
+        headers: buildCompatibleAuthHeaders(connection, isAnthropic),
       }, effectiveProxy);
       if (modelsRes.ok) return { valid: true, error: null };
       if (isAuthFailure(modelsRes.status)) return { valid: false, error: "Invalid API key" };
+      // Drain the failed /models body before the next request so the socket
+      // and the single-read budget stay clean.
+      await readResponseError(modelsRes);
 
-      const chatRes = await fetchWithConnectionProxy(`${baseUrl}/chat/completions`, {
+      const chatUrl = buildCompatibleChatUrl(
+        connection.providerSpecificData?.baseUrl,
+        connection.provider
+      );
+      const chatRes = await fetchWithConnectionProxy(chatUrl, {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${connection.apiKey}`,
+          ...buildCompatibleAuthHeaders(connection, isAnthropic),
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -398,39 +431,6 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
       }, effectiveProxy);
       const valid = chatRes.ok || isReachableInferenceStatus(chatRes.status);
       return { valid, error: valid ? null : (await readResponseError(chatRes)) || "Invalid API key or base URL" };
-    } catch (err) {
-      return { valid: false, error: err.message };
-    }
-  }
-
-  if (isAnthropicCompatibleProvider(connection.provider)) {
-    let modelsBase = connection.providerSpecificData?.baseUrl;
-    if (!modelsBase) return { valid: false, error: "Missing base URL" };
-    try {
-      modelsBase = modelsBase.replace(/\/$/, "");
-      if (modelsBase.endsWith("/messages")) modelsBase = modelsBase.slice(0, -9);
-      const modelsRes = await fetchWithConnectionProxy(`${modelsBase}/models`, {
-        headers: { "x-api-key": connection.apiKey, "anthropic-version": "2023-06-01", "Authorization": `Bearer ${connection.apiKey}` },
-      }, effectiveProxy);
-      if (modelsRes.ok) return { valid: true, error: null };
-      if (isAuthFailure(modelsRes.status)) return { valid: false, error: "Invalid API key" };
-
-      const messagesRes = await fetchWithConnectionProxy(`${modelsBase}/messages`, {
-        method: "POST",
-        headers: {
-          "x-api-key": connection.apiKey,
-          "anthropic-version": "2023-06-01",
-          "Authorization": `Bearer ${connection.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: connection.defaultModel || "test",
-          max_tokens: 1,
-          messages: [{ role: "user", content: "ping" }],
-        }),
-      }, effectiveProxy);
-      const valid = messagesRes.ok || isReachableInferenceStatus(messagesRes.status);
-      return { valid, error: valid ? null : (await readResponseError(messagesRes)) || "Invalid API key or base URL" };
     } catch (err) {
       return { valid: false, error: err.message };
     }

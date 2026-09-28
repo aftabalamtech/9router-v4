@@ -8,6 +8,22 @@ import "open-sse/index.js";
 import crypto from "crypto";
 
 import { generatePKCE, generateState } from "./utils/pkce.js";
+import { readJsonBody, readResponseOnce, parseErrorPayload } from "../net/httpBody.js";
+
+/**
+ * Device-code / token responses must have their body read exactly once.
+ * `try { res.json() } catch { res.text() }` consumed the stream inside .json()
+ * and then threw "Body is unusable: Body has already been read" for non-JSON
+ * upstreams, which masked the real error. Text-first is always safe.
+ */
+async function readDeviceCodeResponse(response) {
+  const { json, text } = await readJsonBody(response);
+  if (json && typeof json === "object") return json;
+  return {
+    error: "invalid_response",
+    error_description: String(text || "").slice(0, 300) || "Upstream returned a non-JSON response",
+  };
+}
 import {
   CLAUDE_CONFIG,
   CODEX_CONFIG,
@@ -161,12 +177,13 @@ const PROVIDERS = {
         }),
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Token exchange failed: ${error}`);
-      }
+      const __body = await readResponseOnce(response);
+if (!__body.okStatus) {
+          throw new Error(`Token exchange failed: ${parseErrorPayload(__body.text, { status: __body.status })}`);
+}
 
-      return await response.json();
+      if (!__body.parsed) throw new Error("Token exchange returned a non-JSON response");
+      return __body.json;
     },
     mapTokens: (tokens) => ({
       accessToken: tokens.access_token,
@@ -213,12 +230,13 @@ const PROVIDERS = {
         }),
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Token exchange failed: ${error}`);
-      }
+      const __body = await readResponseOnce(response);
+if (!__body.okStatus) {
+          throw new Error(`Token exchange failed: ${parseErrorPayload(__body.text, { status: __body.status })}`);
+}
 
-      return await response.json();
+      if (!__body.parsed) throw new Error("Token exchange returned a non-JSON response");
+      return __body.json;
     },
     mapTokens: (tokens) => {
       const info = extractCodexAccountInfo(tokens.id_token);
@@ -290,11 +308,12 @@ const PROVIDERS = {
           code_verifier: codeVerifier,
         }),
       });
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`xAI token exchange failed: ${error}`);
+      const __body = await readResponseOnce(response);
+      if (!__body.okStatus) {
+        throw new Error(`xAI token exchange failed: ${parseErrorPayload(__body.text, { status: __body.status })}`);
       }
-      return await response.json();
+      if (!__body.parsed) throw new Error("xAI token exchange returned a non-JSON response");
+      return __body.json;
     },
     mapTokens: (tokens) => {
       const mapped = {
@@ -343,12 +362,13 @@ const PROVIDERS = {
         }),
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Token exchange failed: ${error}`);
-      }
+      const __body = await readResponseOnce(response);
+if (!__body.okStatus) {
+          throw new Error(`Token exchange failed: ${parseErrorPayload(__body.text, { status: __body.status })}`);
+}
 
-      return await response.json();
+      if (!__body.parsed) throw new Error("Token exchange returned a non-JSON response");
+      return __body.json;
     },
     postExchange: async (tokens) => {
       // Fetch user info
@@ -427,12 +447,13 @@ const PROVIDERS = {
         }),
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Token exchange failed: ${error}`);
-      }
+      const __body = await readResponseOnce(response);
+if (!__body.okStatus) {
+          throw new Error(`Token exchange failed: ${parseErrorPayload(__body.text, { status: __body.status })}`);
+}
 
-      return await response.json();
+      if (!__body.parsed) throw new Error("Token exchange returned a non-JSON response");
+      return __body.json;
     },
     postExchange: async (tokens) => {
       // Numeric enums matching Antigravity binary ClientMetadata
@@ -658,12 +679,13 @@ const PROVIDERS = {
         }),
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Token exchange failed: ${error}`);
-      }
+      const __body = await readResponseOnce(response);
+if (!__body.okStatus) {
+          throw new Error(`Token exchange failed: ${parseErrorPayload(__body.text, { status: __body.status })}`);
+}
 
-      return await response.json();
+      if (!__body.parsed) throw new Error("Token exchange returned a non-JSON response");
+      return __body.json;
     },
     postExchange: async (tokens) => {
       // Fetch user info (MUST succeed to get API key)
@@ -676,12 +698,13 @@ const PROVIDERS = {
         }
       );
       
-      if (!userInfoRes.ok) {
-        const errorText = await userInfoRes.text();
-        throw new Error(`Failed to fetch user info: ${errorText}`);
+      const __ui = await readResponseOnce(userInfoRes);
+      if (!__ui.okStatus) {
+        throw new Error(`Failed to fetch user info: ${parseErrorPayload(__ui.text, { status: __ui.status })}`);
       }
-      
-      const result = await userInfoRes.json();
+      if (!__ui.parsed) throw new Error("User info endpoint returned a non-JSON response");
+
+      const result = __ui.json;
       if (!result.success) {
         throw new Error(`User info request failed: ${result.message || 'Unknown error'}`);
       }
@@ -828,12 +851,13 @@ const PROVIDERS = {
         }),
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Device code request failed: ${error}`);
-      }
+      const __body = await readResponseOnce(response);
+if (!__body.okStatus) {
+          throw new Error(`Token exchange failed: ${parseErrorPayload(__body.text, { status: __body.status })}`);
+}
 
-      return await response.json();
+      if (!__body.parsed) throw new Error("Token exchange returned a non-JSON response");
+      return __body.json;
     },
     pollToken: async (config, deviceCode, codeVerifier) => {
       const response = await fetch(config.tokenUrl, {
@@ -850,9 +874,16 @@ const PROVIDERS = {
         }),
       });
 
+      // Single read: a non-JSON token response must not leave the body consumed.
+      const __poll = await readResponseOnce(response);
       return {
-        ok: response.ok,
-        data: await response.json(),
+        ok: __poll.okStatus,
+        data: __poll.parsed
+          ? __poll.json
+          : {
+            error: "invalid_response",
+            error_description: parseErrorPayload(__poll.text, { status: __poll.status }),
+          },
       };
     },
     mapTokens: (tokens) => ({
@@ -879,12 +910,13 @@ const PROVIDERS = {
         }),
       });
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Device code request failed: ${error}`);
-      }
+      const __body = await readResponseOnce(response);
+if (!__body.okStatus) {
+          throw new Error(`Token exchange failed: ${parseErrorPayload(__body.text, { status: __body.status })}`);
+}
 
-      return await response.json();
+      if (!__body.parsed) throw new Error("Token exchange returned a non-JSON response");
+      return __body.json;
     },
     pollToken: async (config, deviceCode) => {
       const response = await fetch(config.tokenUrl, {
@@ -900,15 +932,11 @@ const PROVIDERS = {
         }),
       });
 
-      // Handle response properly - if not ok, try to get error as text first
-      let data;
-      try {
-        data = await response.json();
-      } catch (e) {
-        // If response is not JSON, get as text
-        const text = await response.text();
-        data = { error: "invalid_response", error_description: text };
-      }
+      // Read the body exactly ONCE as text, then parse. The previous
+      // `try { response.json() } catch { response.text() }` threw
+      // "Body is unusable: Body has already been read" for non-JSON upstreams,
+      // hiding the real error behind an unhandled TypeError.
+      const data = await readDeviceCodeResponse(response);
 
       return {
         ok: response.ok,
@@ -1045,13 +1073,7 @@ const PROVIDERS = {
         }),
       });
 
-      let data;
-      try {
-        data = await response.json();
-      } catch (e) {
-        const text = await response.text();
-        data = { error: "invalid_response", error_description: text };
-      }
+      const data = await readDeviceCodeResponse(response);
 
       // AWS SSO OIDC returns camelCase
       if (data.accessToken) {
@@ -1125,11 +1147,12 @@ const PROVIDERS = {
         headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
         body: new URLSearchParams({ client_id: config.clientId }),
       });
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Device code request failed: ${error}`);
+      const __dc = await readResponseOnce(response);
+      if (!__dc.okStatus) {
+        throw new Error(`Device code request failed: ${parseErrorPayload(__dc.text, { status: __dc.status })}`);
       }
-      const data = await response.json();
+      if (!__dc.parsed) throw new Error("Device code endpoint returned a non-JSON response");
+      const data = __dc.json;
       return {
         device_code: data.device_code,
         user_code: data.user_code,
@@ -1151,13 +1174,7 @@ const PROVIDERS = {
           device_code: deviceCode,
         }),
       });
-      let data;
-      try {
-        data = await response.json();
-      } catch (e) {
-        const text = await response.text();
-        data = { error: "invalid_response", error_description: text };
-      }
+      const data = await readDeviceCodeResponse(response);
       return { ok: response.ok, data };
     },
     mapTokens: (tokens) => ({
@@ -1175,14 +1192,15 @@ const PROVIDERS = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
-      if (!response.ok) {
-        if (response.status === 429) {
+      const __da = await readResponseOnce(response);
+      if (!__da.okStatus) {
+        if (__da.status === 429) {
           throw new Error("Too many pending authorization requests. Please try again later.");
         }
-        const error = await response.text();
-        throw new Error(`Device auth initiation failed: ${error}`);
+        throw new Error(`Device auth initiation failed: ${parseErrorPayload(__da.text, { status: __da.status })}`);
       }
-      const data = await response.json();
+      if (!__da.parsed) throw new Error("Device auth endpoint returned a non-JSON response");
+      const data = __da.json;
       return {
         device_code: data.code,
         user_code: data.code,
@@ -1198,7 +1216,14 @@ const PROVIDERS = {
       if (response.status === 403) return { ok: false, data: { error: "access_denied", error_description: "Authorization denied by user" } };
       if (response.status === 410) return { ok: false, data: { error: "expired_token", error_description: "Authorization code expired" } };
       if (!response.ok) return { ok: false, data: { error: "poll_failed", error_description: `Poll failed: ${response.status}` } };
-      const data = await response.json();
+      const __kp = await readResponseOnce(response);
+      if (!__kp.parsed) {
+        return {
+          ok: false,
+          data: { error: "invalid_response", error_description: parseErrorPayload(__kp.text, { status: __kp.status }) },
+        };
+      }
+      const data = __kp.json;
       if (data.status === "approved" && data.token) {
         // Fetch profile to get orgId for X-Kilocode-OrganizationID header
         let orgId = null;
@@ -1259,11 +1284,12 @@ const PROVIDERS = {
           headers: { "Content-Type": "application/json", Accept: "application/json" },
           body: JSON.stringify({ grant_type: "authorization_code", code, client_type: "extension", redirect_uri: redirectUri }),
         });
-        if (!response.ok) {
-          const error = await response.text();
-          throw new Error(`Cline token exchange failed: ${error}`);
+        const __cl = await readResponseOnce(response);
+        if (!__cl.okStatus) {
+          throw new Error(`Cline token exchange failed: ${parseErrorPayload(__cl.text, { status: __cl.status })}`);
         }
-        const data = await response.json();
+        if (!__cl.parsed) throw new Error("Cline token endpoint returned a non-JSON response");
+        const data = __cl.json;
         return {
           access_token: data.data?.accessToken || data.accessToken,
           refresh_token: data.data?.refreshToken || data.refreshToken,
@@ -1318,13 +1344,17 @@ const PROVIDERS = {
         headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
         body: body.toString(),
       });
-      if (!response.ok) throw new Error(`GitLab token exchange failed: ${await response.text()}`);
-      const tokens = await response.json();
+      const __gl = await readResponseOnce(response);
+      if (!__gl.okStatus) {
+        throw new Error(`GitLab token exchange failed: ${parseErrorPayload(__gl.text, { status: __gl.status })}`);
+      }
+      if (!__gl.parsed) throw new Error("GitLab token endpoint returned a non-JSON response");
+      const tokens = __gl.json;
       // Fetch user info
       const userRes = await fetch(`${baseUrl}${config.userInfoUrlPath}`, {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
       });
-      const user = userRes.ok ? await userRes.json() : {};
+      const user = (await readResponseOnce(userRes)).json || {};
       return { ...tokens, _user: user, _baseUrl: baseUrl, _clientId: clientId };
     },
     mapTokens: (tokens) => ({
@@ -1365,8 +1395,12 @@ const PROVIDERS = {
         },
         body: "{}",
       });
-      if (!response.ok) throw new Error(`CodeBuddy state request failed: ${await response.text()}`);
-      const data = await response.json();
+      const __cb = await readResponseOnce(response);
+      if (!__cb.okStatus) {
+        throw new Error(`CodeBuddy state request failed: ${parseErrorPayload(__cb.text, { status: __cb.status })}`);
+      }
+      if (!__cb.parsed) throw new Error("CodeBuddy state endpoint returned a non-JSON response");
+      const data = __cb.json;
       if (data.code !== 0 || !data.data?.state || !data.data?.authUrl) {
         throw new Error(`CodeBuddy state error: ${data.msg || "missing state/authUrl"}`);
       }
@@ -1394,7 +1428,14 @@ const PROVIDERS = {
         body: JSON.stringify({ state: deviceCode }),
       });
       if (!response.ok) return { ok: false, data: { error: "request_failed" } };
-      const data = await response.json();
+      const __cq = await readResponseOnce(response);
+      if (!__cq.parsed) {
+        return {
+          ok: false,
+          data: { error: "invalid_response", error_description: parseErrorPayload(__cq.text, { status: __cq.status }) },
+        };
+      }
+      const data = __cq.json;
       // code 11217 = pending, code 0 = success
       if (data.code === 0 && data.data?.accessToken) {
         return {

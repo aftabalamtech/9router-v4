@@ -1,5 +1,6 @@
 import { PROVIDERS } from "../config/providers.js";
 import { buildClineHeaders } from "../../src/shared/utils/clineAuth.js";
+import { buildCompatibleChatUrl } from "../../src/lib/net/compatibleUrl.js";
 
 const OPENAI_COMPATIBLE_PREFIX = "openai-compatible-";
 const OPENAI_COMPATIBLE_DEFAULTS = {
@@ -24,15 +25,21 @@ function getOpenAICompatibleType(provider) {
   return provider.includes("responses") ? "responses" : "chat";
 }
 
+// Single source of truth for custom-provider endpoint construction. Kept as
+// thin local wrappers so the module's callers do not change, but the URL logic
+// itself lives in one place (lib/net/compatibleUrl.js) — it previously existed
+// in three divergent copies.
 function buildOpenAICompatibleUrl(baseUrl, apiType) {
-  const normalized = baseUrl.replace(/\/$/, "");
-  const path = apiType === "responses" ? "/responses" : "/chat/completions";
-  return `${normalized}${path}`;
+  return (
+    buildCompatibleChatUrl(
+      baseUrl,
+      apiType === "responses" ? "openai-compatible-responses-" : "openai-compatible-chat-"
+    ) || ""
+  );
 }
 
 function buildAnthropicCompatibleUrl(baseUrl) {
-  const normalized = baseUrl.replace(/\/$/, "");
-  return `${normalized}/messages`;
+  return buildCompatibleChatUrl(baseUrl, "anthropic-compatible-") || "";
 }
 
 function buildQwenBaseUrl(resourceUrl, fallbackBaseUrl) {

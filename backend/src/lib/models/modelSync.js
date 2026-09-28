@@ -93,11 +93,27 @@ export async function persistDiscovered({ storageAlias, discovered, manualIds })
     const prev = existing[key];
     if (!prev) {
       added += 1;
-    } else if (JSON.stringify({ ...prev, syncedAt: null, stale: null }) !== JSON.stringify({ ...record, syncedAt: null, stale: null })) {
+      await syncedKv.set(key, record);
+      existing[key] = record;
+      continue;
+    }
+    // Idempotent update: a repeated sync with unchanged metadata is a no-op,
+    // and any change is merged so fields owned by other paths (a manual flag,
+    // an upstreamModelId captured earlier) are not silently dropped.
+    const mergedRecord = { ...prev, ...record, manual: prev.manual || record.manual };
+    if (JSON.stringify({ ...prev, syncedAt: null, stale: null }) !== JSON.stringify({ ...mergedRecord, syncedAt: null, stale: null })) {
+      mergedRecord.syncedAt = now;
+      await syncedKv.set(key, mergedRecord);
+      existing[key] = mergedRecord;
+      updated += 1;
+    } else if (prev.stale) {
+      // A model that reappears upstream must be revived (stale → false).
+      mergedRecord.stale = false;
+      mergedRecord.syncedAt = now;
+      await syncedKv.set(key, mergedRecord);
+      existing[key] = mergedRecord;
       updated += 1;
     }
-    await syncedKv.set(key, record);
-    existing[key] = record;
   }
 
   let stale = 0;
@@ -146,7 +162,10 @@ export function syncJobSnapshot(job) {
 }
 
 function emptySummary() {
-  return { discovered: 0, added: 0, updated: 0, stale: 0, failed: 0, connections: 0, lastSyncAt: null };
+  return {
+    discovered: 0, added: 0, updated: 0, stale: 0, failed: 0, connections: 0,
+    partial: false, preserved: 0, lastSyncAt: null,
+  };
 }
 
 async function discoverWithRetry(discoverFn, connectionId, isCancelled) {
@@ -248,6 +267,28 @@ async function runSyncJob(job) {
 
     const merged = mergeConnectionModels(perConnection);
     job.summary.discovered = merged.length;
+
+    // Every connection failed / returned an empty catalog. Do NOT touch the
+    // stored catalog: an unreachable or empty upstream (rate limit, auth
+    // expiry, gateway outage, provider that simply has no /models endpoint)
+    // must never be interpreted as "the user removed all these models".
+    // Previously this path called persistDiscovered with an empty list, which
+    // marked the ENTIRE existing catalog stale — i.e. a transient upstream
+    // failure silently emptied the provider's model list.
+    if (merged.length === 0) {
+      job.summary.preserved = Object.keys(await getSyncedModels(job.storageAlias)).length;
+      job.error = job.summary.failed > 0
+        ? "No models discovered — every connection failed. Your existing models were kept."
+        : "Upstream returned an empty model list. Your existing models were kept.";
+      job.summary.durationMs = Date.now() - startedAt;
+      job.status = "done";
+      job.current = null;
+      job.finishedAt = Date.now();
+      job.emitter.emit("update", syncJobSnapshot(job));
+      job.emitter.emit("done", syncJobSnapshot(job));
+      return;
+    }
+
     const persist = await persistDiscovered({
       storageAlias: job.storageAlias,
       discovered: merged,
@@ -256,6 +297,9 @@ async function runSyncJob(job) {
     job.summary.added = persist.added;
     job.summary.updated = persist.updated;
     job.summary.stale = persist.stale;
+    // A partial sync (some connections failed) still refreshes the catalog from
+    // the connections that DID answer, so this is recorded explicitly.
+    job.summary.partial = job.summary.failed > 0;
     const stamped = await markSyncTimestamp(job.providerId);
     job.summary.lastSyncAt = stamped.lastSyncAt;
     job.summary.durationMs = Date.now() - startedAt;
