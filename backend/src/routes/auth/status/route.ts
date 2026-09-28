@@ -32,14 +32,19 @@ export async function GET(req, res) {
       isLoggedIn: !!session,
     });
   } catch {
+    // DB unavailable — degraded response, but env-derived state must stay
+    // truthful: INITIAL_PASSWORD comes from process.env, not the database, so
+    // a DB hiccup must never make the login page claim password login is not
+    // configured. (Regression: this catch used to hardcode all-false.)
+    const initialPasswordConfigured = !!process.env.INITIAL_PASSWORD;
     return res.json({
       requireLogin: true,
       authMode: "password",
       oidcConfigured: false,
       oidcLoginLabel: "Sign in with OIDC",
       hasPassword: false,
-      initialPasswordConfigured: false,
-      passwordConfigured: false,
+      initialPasswordConfigured,
+      passwordConfigured: initialPasswordConfigured,
       displayName: "Password user",
       loginMethod: "Password",
       oidcName: null,

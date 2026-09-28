@@ -8,7 +8,8 @@
 export default {
   version: 2,
   name: "composite-unique-codebuddy-accounts",
-  up(db, dialect = "sqlite") {
+  // async up: the adapter contract is async (PostgreSQL); every statement awaited.
+  async up(db, dialect = "sqlite") {
     const isPostgres = dialect === "postgres";
 
     const COLUMNS = `id, email, password, profileDir, ammailAlias, signupMethod,
@@ -16,10 +17,10 @@ export default {
 
     if (isPostgres) {
       // 1. Rename existing table (+ its PK/index move with it in PG)
-      db.exec("ALTER TABLE codebuddyAccounts RENAME TO codebuddyAccounts_old");
+      await db.exec("ALTER TABLE codebuddyAccounts RENAME TO codebuddyAccounts_old");
 
       // 2. Create the new table with the composite unique constraint
-      db.exec(`
+      await db.exec(`
         CREATE TABLE codebuddyAccounts (
           id SERIAL PRIMARY KEY,
           email TEXT NOT NULL,
@@ -39,10 +40,10 @@ export default {
       `);
 
       // 3. Recreate index
-      db.exec("CREATE INDEX IF NOT EXISTS idx_cba_email ON codebuddyAccounts(email)");
+      await db.exec("CREATE INDEX IF NOT EXISTS idx_cba_email ON codebuddyAccounts(email)");
 
       // 4. Copy data, ignoring any (email, provider) duplicates.
-      db.exec(`
+      await db.exec(`
         INSERT INTO codebuddyAccounts (${COLUMNS})
         SELECT ${COLUMNS}
         FROM codebuddyAccounts_old
@@ -50,16 +51,16 @@ export default {
       `);
 
       // 5. Drop old table
-      db.exec("DROP TABLE codebuddyAccounts_old");
+      await db.exec("DROP TABLE codebuddyAccounts_old");
       return;
     }
 
     // ── SQLite path (original behaviour) ──────────────────────────────────
     // 1. Rename existing table
-    db.exec("ALTER TABLE codebuddyAccounts RENAME TO codebuddyAccounts_old");
+    await db.exec("ALTER TABLE codebuddyAccounts RENAME TO codebuddyAccounts_old");
 
     // 2. Create new table with unique(email, provider) constraint
-    db.exec(`
+    await db.exec(`
       CREATE TABLE codebuddyAccounts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         email TEXT NOT NULL,
@@ -79,10 +80,10 @@ export default {
     `);
 
     // 3. Recreate index
-    db.exec("CREATE INDEX IF NOT EXISTS idx_cba_email ON codebuddyAccounts(email)");
+    await db.exec("CREATE INDEX IF NOT EXISTS idx_cba_email ON codebuddyAccounts(email)");
 
     // 4. Copy data from old table, ignoring any constraint violations.
-    db.exec(`
+    await db.exec(`
       INSERT OR IGNORE INTO codebuddyAccounts (
         id, email, password, profileDir, ammailAlias, signupMethod,
         apiKey, apiKeyStatus, lastError, lastRunAt, createdAt, provider, canvaEnrolled
@@ -94,6 +95,6 @@ export default {
     `);
 
     // 5. Drop old table
-    db.exec("DROP TABLE codebuddyAccounts_old");
+    await db.exec("DROP TABLE codebuddyAccounts_old");
   }
 };

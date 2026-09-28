@@ -20,3 +20,18 @@ export function getMetaSync(adapter, key, fallback = null) {
 export function setMetaSync(adapter, key, value) {
   adapter.run(`INSERT INTO _meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, [key, String(value)]);
 }
+
+// Async versions — the adapter contract is async-capable (PostgreSQL), so the
+// migration layer MUST use these. The sync variants above only ever worked
+// with synchronous SQLite adapters.
+export async function getMetaOnAdapter(adapter, key, fallback = null) {
+  const row = await adapter.get(`SELECT value FROM _meta WHERE key = ?`, [key]);
+  return row ? row.value : fallback;
+}
+
+export async function setMetaOnAdapter(adapter, key, value) {
+  await adapter.run(
+    `INSERT INTO _meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    [key, String(value)]
+  );
+}

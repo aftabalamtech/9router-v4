@@ -85,10 +85,16 @@ async function initAdapter() {
     state.logged = true;
   }
 
-  const { runMigrationOnce } = await import("./migrate.js");
-  await runMigrationOnce(adapter, { dialect: "sqlite" });
+  // Wrap BEFORE running migrations: the async adapter's transaction() awaits
+  // async bodies (migrations are async). The raw SQLite drivers' transaction
+  // helpers are synchronous — an async migration body would escape the
+  // savepoint via microtasks and its statements would run outside the
+  // transaction. The wrapper serializes and awaits correctly for both.
   const { createAsyncAdapter } = await import("./adapters/asyncAdapter.js");
-  return createAsyncAdapter(adapter);
+  const wrapped = createAsyncAdapter(adapter);
+  const { runMigrationOnce } = await import("./migrate.js");
+  await runMigrationOnce(wrapped, { dialect: "sqlite" });
+  return wrapped;
 }
 
 export async function getAdapter() {

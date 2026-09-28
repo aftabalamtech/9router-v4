@@ -10,10 +10,11 @@ import { TABLES, buildCreateTableSql } from "../schema.js";
 export default {
   version: 1,
   name: "initial",
-  up(db, dialect = "sqlite") {
+  // async up: the adapter contract is async (PostgreSQL), so db.exec must be awaited.
+  async up(db, dialect = "sqlite") {
     for (const [name, def] of Object.entries(TABLES)) {
-      db.exec(buildCreateTableSql(name, def, dialect));
-      for (const idx of def.indexes || []) db.exec(idx);
+      await db.exec(buildCreateTableSql(name, def, dialect));
+      for (const idx of def.indexes || []) await db.exec(idx);
     }
   },
 };

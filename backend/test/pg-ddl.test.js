@@ -68,17 +68,18 @@ describe("postgres DDL validity (regression: 42601)", () => {
     for (const migration of MIGRATIONS) {
       const mod = migration;
       assert.equal(typeof mod.up, "function", `migration ${migration.version} has no up()`);
-      // Calls must not throw with a dialect-aware no-op db.
+      // Calls must not throw with a dialect-aware no-op db. Migrations are
+      // async — MUST await, or the collected-SQL assertions below run vacuously.
       const executed = [];
       const noopDb = {
-        exec: (sql) => executed.push(sql),
-        run: (sql) => executed.push(sql),
-        get: () => undefined,
-        all: () => [],
-        transaction: (fn) => fn(),
+        exec: async (sql) => { executed.push(sql); },
+        run: async (sql) => { executed.push(sql); },
+        get: async () => undefined,
+        all: async () => [],
+        transaction: async (fn) => fn(),
       };
-      // Migration 002 with postgres dialect must emit PG-safe SQL.
-      mod.up(noopDb, "postgres");
+      await mod.up(noopDb, "postgres");
+      assert.ok(executed.length > 0, `migration ${migration.version} emitted no SQL`);
       for (const sql of executed) {
         if (typeof sql !== "string") continue;
         assert.equal(
