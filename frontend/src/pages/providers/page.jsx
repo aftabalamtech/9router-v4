@@ -1,5 +1,5 @@
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import PropTypes from "prop-types";
 import {
   Card,
@@ -24,6 +24,7 @@ import { Link } from 'react-router-dom';
 import { getErrorCode, getRelativeTime } from "@/shared/utils";
 import { useNotificationStore } from "@/store/notificationStore";
 import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
+import useConnectionEvents from "@/shared/hooks/useConnectionEvents";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import ModelAvailabilityBadge from "./components/ModelAvailabilityBadge";
 
@@ -182,6 +183,20 @@ export default function ProvidersPage() {
     const t = setTimeout(() => { if (!cancelled) setLoading(false); }, 1500);
     return () => { cancelled = true; clearTimeout(t); };
   }, []);
+
+  // Live status: any connection change (test result, runtime error, OAuth
+  // refresh, CRUD) refetches the list — no navigation or reload needed.
+  const refetchTimer = useRef(null);
+  const refetchSoon = useCallback(() => {
+    clearTimeout(refetchTimer.current);
+    refetchTimer.current = setTimeout(() => {
+      cachedJson("/api/providers", { force: true })
+        .then((res) => { if (res.ok) setConnections(res.data.connections || []); })
+        .catch(() => {});
+    }, 150); // coalesce bursts of events into one fetch
+  }, []);
+  useEffect(() => () => clearTimeout(refetchTimer.current), []);
+  useConnectionEvents({ onEvent: refetchSoon, onRevision: refetchSoon });
 
   const getProviderStats = (providerId, authType) => {
     const providerConnections = connections.filter(
@@ -878,30 +893,72 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
     apiType: "chat",
     baseUrl: "https://api.openai.com/v1",
   });
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [prefixTouched, setPrefixTouched] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [checkKey, setCheckKey] = useState("");
+  const [formError, setFormError] = useState(null);
+  const [apiKey, setApiKey] = useState("");
+  const [connectionName, setConnectionName] = useState("");
   const [checkModelId, setCheckModelId] = useState("");
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
+  const [createdNode, setCreatedNode] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState(null);
 
   const apiTypeOptions = [
     { value: "chat", label: "Chat Completions" },
     { value: "responses", label: "Responses API" },
   ];
 
+  // Auto-generate a valid prefix from the provider name; the user can still
+  // edit it in Advanced Settings (prefixTouched disables auto-generation).
+  const slugifyPrefix = (name) =>
+    (name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  const handleNameChange = (e) => {
+    const name = e.target.value;
+    setFormData((prev) => ({
+      ...prev,
+      name,
+      prefix: prefixTouched ? prev.prefix : slugifyPrefix(name),
+    }));
+    if (formError) setFormError(null);
+  };
+
   useEffect(() => {
     const defaultBaseUrl = "https://api.openai.com/v1";
     setFormData((prev) => ({ ...prev, baseUrl: defaultBaseUrl }));
   }, [formData.apiType]);
 
+  const validateForm = () => {
+    const errors = {};
+    if (!formData.name.trim()) errors.name = "Provider name is required";
+    if (!formData.baseUrl.trim()) errors.baseUrl = "Base URL is required";
+    else {
+      try {
+        const u = new URL(formData.baseUrl.trim());
+        if (!"http:".includes(u.protocol.slice(0, -1)) && u.protocol !== "http:" && u.protocol !== "https:") {
+          errors.baseUrl = "URL must start with http:// or https://";
+        }
+      } catch {
+        errors.baseUrl = "Enter a valid URL (e.g. https://api.example.com/v1)";
+      }
+    }
+    if (!formData.prefix.trim()) errors.prefix = "Prefix is required";
+    else if (!/^[a-z0-9][a-z0-9-]*$/.test(formData.prefix.trim())) {
+      errors.prefix = "Use lowercase letters, numbers and dashes only";
+    }
+    return errors;
+  };
+
   const handleSubmit = async () => {
-    if (
-      !formData.name.trim() ||
-      !formData.prefix.trim() ||
-      !formData.baseUrl.trim()
-    )
+    const errors = validateForm();
+    if (Object.keys(errors).length > 0) {
+      setFormError(Object.values(errors)[0]);
       return;
+    }
     setSubmitting(true);
+    setFormError(null);
     try {
       const res = await fetch("/api/provider-nodes", {
         method: "POST",
@@ -916,20 +973,78 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
       });
       const data = await res.json();
       if (res.ok) {
+        setCreatedNode(data.node);
         onCreated(data.node);
-        setFormData({
-          name: "",
-          prefix: "",
-          apiType: "chat",
-          baseUrl: "https://api.openai.com/v1",
-        });
-        setCheckKey("");
-        setValidationResult(null);
+      } else {
+        setFormError(data.error || "Failed to create provider");
       }
     } catch (error) {
       console.log("Error creating OpenAI Compatible node:", error);
+      setFormError("Network error while creating provider");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // Create the API-key connection for the new node, then import discovered
+  // models (if the Test Connection step found any). Never overwrites an
+  // existing connection — creation happens once, immediately after the node.
+  const handleSaveConnectionAndImport = async (modelsToImport) => {
+    if (!createdNode) return;
+    setImporting(true);
+    setImportResult(null);
+    try {
+      // 1. Save the API key as the node's connection (single allowed connection).
+      const connRes = await fetch("/api/providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: createdNode.id,
+          name: connectionName.trim() || createdNode.name,
+          apiKey: apiKey,
+          testStatus: validationResult?.valid ? "active" : "unknown",
+        }),
+      });
+      const connData = await connRes.json().catch(() => ({}));
+      if (!connRes.ok && connRes.status !== 400) {
+        setImportResult({ error: connData.error || "Failed to save API key" });
+        return;
+      }
+
+      // 2. Import discovered models as manual aliases (skips duplicates).
+      if (Array.isArray(modelsToImport) && modelsToImport.length > 0) {
+        let imported = 0;
+        const existing = {}; // filled from alias list below
+        try {
+          const aliasRes = await fetch("/api/models/alias");
+          if (aliasRes.ok) Object.assign(existing, (await aliasRes.json()).aliases || {});
+        } catch { /* proceed without dedupe list */ }
+        const takenValues = new Set(Object.values(existing));
+        const takenKeys = new Set(Object.keys(existing));
+        for (const m of modelsToImport) {
+          if (!m?.id) continue;
+          const fullModel = `${createdNode.id}/${m.id}`;
+          if (takenValues.has(fullModel)) continue;
+          let alias = m.id.split("/").pop() || m.id;
+          if (takenKeys.has(alias)) alias = `${createdNode.prefix}-${alias}`;
+          if (takenKeys.has(alias)) continue;
+          const put = await fetch("/api/models/alias", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model: fullModel, alias }),
+          });
+          if (put.ok) {
+            imported += 1;
+            takenKeys.add(alias);
+            takenValues.add(fullModel);
+          }
+        }
+        setImportResult({ imported, total: modelsToImport.length });
+      } else {
+        setImportResult({ imported: 0, total: 0 });
+      }
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -945,7 +1060,7 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
     try {
       const data = await fetchProviderNodeValidation({
         baseUrl: formData.baseUrl,
-        apiKey: checkKey,
+        apiKey: apiKey,
         type: "openai-compatible",
         modelId: checkModelId.trim() || undefined,
       });
@@ -993,78 +1108,152 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
   return (
     <Modal isOpen={isOpen} title="Add OpenAI Compatible" onClose={onClose}>
       <div className="flex flex-col gap-4">
-        <Input
-          label="Name"
-          value={formData.name}
-          onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-          placeholder="OpenAI Compatible (Prod)"
-          hint="Required. A friendly label for this node."
-        />
-        <Input
-          label="Prefix"
-          value={formData.prefix}
-          onChange={(e) => setFormData({ ...formData, prefix: e.target.value })}
-          placeholder="oc-prod"
-          hint="Required. Used as the provider prefix for model IDs."
-        />
-        <Select
-          label="API Type"
-          options={apiTypeOptions}
-          value={formData.apiType}
-          onChange={(e) =>
-            setFormData({ ...formData, apiType: e.target.value })
-          }
-        />
-        <Input
-          label="Base URL"
-          value={formData.baseUrl}
-          onChange={(e) =>
-            setFormData({ ...formData, baseUrl: e.target.value })
-          }
-          placeholder="https://api.openai.com/v1"
-          hint="Use the base URL (ending in /v1) for your OpenAI-compatible API."
-        />
-        <Input
-          label="API Key (for Check)"
-          type="password"
-          value={checkKey}
-          onChange={(e) => setCheckKey(e.target.value)}
-        />
-        <Input
-          label="Model ID (optional)"
-          value={checkModelId}
-          onChange={(e) => setCheckModelId(e.target.value)}
-          placeholder="e.g. gpt-4, claude-3-opus"
-          hint="If provider lacks /models endpoint, enter a model ID to validate via chat/completions instead."
-        />
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-          <Button
-            onClick={handleValidate}
-            disabled={!checkKey || validating || !formData.baseUrl.trim()}
-            variant="secondary"
-            className="w-full sm:w-auto"
-          >
-            {validating ? "Checking..." : "Check"}
-          </Button>
-          {renderValidationResult()}
-        </div>
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Button
-            onClick={handleSubmit}
-            fullWidth
-            disabled={
-              !formData.name.trim() ||
-              !formData.prefix.trim() ||
-              !formData.baseUrl.trim() ||
-              submitting
-            }
-          >
-            {submitting ? "Creating..." : "Create"}
-          </Button>
-          <Button onClick={onClose} variant="ghost" fullWidth>
-            Cancel
-          </Button>
-        </div>
+        {!createdNode ? (
+          <>
+            <Input
+              label="Provider Name"
+              value={formData.name}
+              onChange={handleNameChange}
+              placeholder="My Provider"
+              hint="A friendly label for this provider."
+              error={formError && !formData.name.trim() ? formError : undefined}
+            />
+            <Input
+              label="Base URL"
+              value={formData.baseUrl}
+              onChange={(e) => {
+                setFormData({ ...formData, baseUrl: e.target.value });
+                if (formError) setFormError(null);
+              }}
+              placeholder="https://api.openai.com/v1"
+              hint="API endpoint, usually ending in /v1."
+              error={formError && formData.baseUrl.trim() && !formData.name.trim() === false ? formError : undefined}
+            />
+            <Input
+              label="API Key (optional)"
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Leave empty for unauthenticated upstreams"
+              hint="Stored encrypted-at-rest; only needed if the upstream requires auth."
+            />
+
+            {/* Advanced settings — the prefix and endpoint type most users can leave alone. */}
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
+            >
+              <span className="material-symbols-outlined text-sm">{showAdvanced ? "expand_less" : "expand_more"}</span>
+              Advanced Settings
+            </button>
+            {showAdvanced && (
+              <div className="flex flex-col gap-4 border-l border-border pl-3">
+                <Input
+                  label="Provider Prefix"
+                  value={formData.prefix}
+                  onChange={(e) => {
+                    setPrefixTouched(true);
+                    setFormData({ ...formData, prefix: e.target.value.toLowerCase() });
+                    if (formError) setFormError(null);
+                  }}
+                  placeholder="my-provider"
+                  hint="Used as the provider prefix in model IDs (e.g. my-provider/gpt-4o)."
+                />
+                <Select
+                  label="API Type"
+                  options={apiTypeOptions}
+                  value={formData.apiType}
+                  onChange={(e) => setFormData({ ...formData, apiType: e.target.value })}
+                  hint="Use Responses API only for endpoints exposing /responses."
+                />
+                <Input
+                  label="Connection Name"
+                  value={connectionName}
+                  onChange={(e) => setConnectionName(e.target.value)}
+                  placeholder={formData.name || "Default"}
+                  hint="Label for the API-key connection created with this provider."
+                />
+              </div>
+            )}
+
+            {formError && (
+              <p className="text-sm text-red-500">{formError}</p>
+            )}
+
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <Button
+                onClick={handleValidate}
+                disabled={validating || !formData.baseUrl.trim()}
+                variant="secondary"
+                className="w-full sm:w-auto"
+              >
+                {validating ? "Testing..." : "Test Connection"}
+              </Button>
+              {renderValidationResult()}
+            </div>
+            <Input
+              label="Model ID (optional)"
+              value={checkModelId}
+              onChange={(e) => setCheckModelId(e.target.value)}
+              placeholder="e.g. gpt-4, claude-3-opus"
+              hint="If the provider lacks /models, set this to validate via a chat request."
+            />
+
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button
+                onClick={handleSubmit}
+                fullWidth
+                disabled={
+                  !formData.name.trim() ||
+                  !formData.prefix.trim() ||
+                  !formData.baseUrl.trim() ||
+                  submitting
+                }
+              >
+                {submitting ? "Creating..." : "Create Provider"}
+              </Button>
+              <Button onClick={onClose} variant="ghost" fullWidth>
+                Cancel
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <Badge variant="success">Created</Badge>
+              <span className="text-sm">{createdNode.name}</span>
+              <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{createdNode.id}</code>
+            </div>
+            {validationResult?.valid && Array.isArray(validationResult.models) && validationResult.models.length > 0 && importResult === null && (
+              <>
+                <p className="text-sm text-text-muted">
+                  Discovered {validationResult.models.length} models upstream. Import them now?
+                </p>
+                <div className="max-h-40 overflow-y-auto flex flex-col gap-1 bg-sidebar/40 rounded-lg p-2">
+                  {validationResult.models.slice(0, 50).map((m) => (
+                    <span key={m.id} className="text-xs font-mono truncate">{m.id}</span>
+                  ))}
+                </div>
+                <Button onClick={() => handleSaveConnectionAndImport(validationResult.models)} disabled={importing} fullWidth icon="download">
+                  {importing ? "Importing..." : `Save API Key & Import ${validationResult.models.length} Models`}
+                </Button>
+              </>
+            )}
+            {importResult && (
+              <p className="text-sm text-text-muted">
+                {importResult.error
+                  ? `API key not saved: ${importResult.error}`
+                  : importResult.total > 0
+                    ? `Imported ${importResult.imported} of ${importResult.total} discovered models. Manage them on the provider page.`
+                    : "Provider ready. Add models manually on the provider page (its upstream has no /models endpoint)."}
+              </p>
+            )}
+            <Button onClick={onClose} fullWidth>
+              {importResult ? "Done" : "Close"}
+            </Button>
+          </>
+        )}
       </div>
     </Modal>
   );

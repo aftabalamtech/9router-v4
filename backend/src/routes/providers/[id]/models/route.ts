@@ -393,14 +393,18 @@ export async function GET_handler(req, res, { params }) {
       if (!baseUrl) {
         return res.status(400).json({ error: "No base URL configured for OpenAI compatible provider" });
       }
-      const url = `${baseUrl.replace(/\/$/, "")}/models`;
-      const response = await fetchWithTimeout(url, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${connection.apiKey}`,
-        },
-      });
+      // Strip ONE trailing slash; tolerate base URLs that already end in /models
+      // (some users paste the full endpoint) so we never build /models/models.
+      let normalizedBase = String(baseUrl).trim().replace(/\/$/, "");
+      if (normalizedBase.endsWith("/models")) {
+        normalizedBase = normalizedBase.slice(0, -"/models".length);
+      }
+      const url = `${normalizedBase}/models`;
+      // The API key may be empty for self-hosted / unauthenticated upstreams —
+      // only send the header when a key exists so empty "Bearer " never leaks.
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (connection.apiKey) headers["Authorization"] = `Bearer ${connection.apiKey}`;
+      const response = await fetchWithTimeout(url, { method: "GET", headers });
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -432,15 +436,16 @@ export async function GET_handler(req, res, { params }) {
       }
 
       const url = `${baseUrl}/models`;
-      const response = await fetchWithTimeout(url, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": connection.apiKey,
-          "anthropic-version": "2023-06-01",
-          "Authorization": `Bearer ${connection.apiKey}`
-        },
-      });
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+      };
+      // Send the key only when present — self-hosted proxies may not need one.
+      if (connection.apiKey) {
+        headers["x-api-key"] = connection.apiKey;
+        headers["Authorization"] = `Bearer ${connection.apiKey}`;
+      }
+      const response = await fetchWithTimeout(url, { method: "GET", headers });
 
       if (!response.ok) {
         const errorText = await response.text();

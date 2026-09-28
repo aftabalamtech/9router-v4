@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import { publishConnectionEvent } from "../../events/connectionEvents.js";
 
 const OPTIONAL_FIELDS = [
   "displayName", "email", "globalPriority", "defaultModel",
@@ -93,6 +94,7 @@ export async function createProviderConnection(data) {
   const db = await getAdapter();
   const now = new Date().toISOString();
   let result;
+  let pendingEvent = null;
 
   await db.transaction(async () => {
     const all = (await db.all(`SELECT * FROM providerConnections WHERE provider = ?`, [data.provider])).map(rowToConn);
@@ -116,6 +118,7 @@ export async function createProviderConnection(data) {
       const merged = { ...existing, ...data, updatedAt: now };
       await upsert(db, merged);
       result = merged;
+      pendingEvent = { type: "updated", id: merged.id, provider: merged.provider, fields: Object.keys(data) };
       return;
     }
 
@@ -149,7 +152,11 @@ export async function createProviderConnection(data) {
     await upsert(db, conn);
     await reorderInTx(db, data.provider);
     result = conn;
+    pendingEvent = { type: "created", id: conn.id, provider: conn.provider, fields: Object.keys(data) };
   });
+  // Publish only after the outer transaction committed — the event revision
+  // bump opens its own transaction and nested savepoints don't survive.
+  if (pendingEvent) publishConnectionEvent(pendingEvent);
 
   return result;
 }
@@ -158,6 +165,7 @@ export async function createProviderConnection(data) {
 export async function updateProviderConnection(id, data) {
   const db = await getAdapter();
   let result;
+  let pendingEvent = null;
   await db.transaction(async () => {
     const row = await db.get(`SELECT * FROM providerConnections WHERE id = ?`, [id]);
     if (!row) { result = null; return; }
@@ -166,13 +174,16 @@ export async function updateProviderConnection(id, data) {
     await upsert(db, merged);
     if (data.priority !== undefined) await reorderInTx(db, existing.provider);
     result = merged;
+    pendingEvent = { type: "updated", id: merged.id, provider: merged.provider, fields: Object.keys(data) };
   });
+  if (pendingEvent) publishConnectionEvent(pendingEvent);
   return result;
 }
 
 export async function updateProviderConnectionByEmail(email, provider, data) {
   const db = await getAdapter();
   let result;
+  let pendingEvent = null;
   await db.transaction(async () => {
     const row = await db.get(
       `SELECT * FROM providerConnections WHERE email = ? AND provider = ? ORDER BY createdAt DESC LIMIT 1`,
@@ -183,20 +194,25 @@ export async function updateProviderConnectionByEmail(email, provider, data) {
     const merged = { ...existing, ...data, updatedAt: new Date().toISOString() };
     await upsert(db, merged);
     result = merged;
+    pendingEvent = { type: "updated", id: merged.id, provider: merged.provider, fields: Object.keys(data) };
   });
+  if (pendingEvent) publishConnectionEvent(pendingEvent);
   return result;
 }
 
 export async function deleteProviderConnection(id) {
   const db = await getAdapter();
   let ok = false;
+  let pendingEvent = null;
   await db.transaction(async () => {
     const row = await db.get(`SELECT provider FROM providerConnections WHERE id = ?`, [id]);
     if (!row) return;
     await db.run(`DELETE FROM providerConnections WHERE id = ?`, [id]);
     await reorderInTx(db, row.provider);
     ok = true;
+    pendingEvent = { type: "deleted", id, provider: row.provider, fields: [] };
   });
+  if (pendingEvent) publishConnectionEvent(pendingEvent);
   return ok;
 }
 
@@ -204,7 +220,9 @@ export async function deleteProviderConnectionsByProvider(providerId) {
   const db = await getAdapter();
   const before = await db.get(`SELECT COUNT(*) AS n FROM providerConnections WHERE provider = ?`, [providerId]);
   await db.run(`DELETE FROM providerConnections WHERE provider = ?`, [providerId]);
-  return before?.n || 0;
+  const count = before?.n || 0;
+  if (count > 0) publishConnectionEvent({ type: "deleted", id: "*", provider: providerId, fields: ["multiple"] });
+  return count;
 }
 
 export async function reorderProviderConnections(providerId) {
@@ -259,5 +277,6 @@ export async function deleteProviderConnectionByEmailAndProvider(email, provider
       await reorderInTx(db, provider);
     }
   });
+  if (ok) publishConnectionEvent({ type: "deleted", id: "*", provider, fields: ["multiple"] });
   return ok;
 }

@@ -9,7 +9,8 @@ import { getModelsByProviderId } from "@/shared/constants/models";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { translate } from "@/i18n/runtime";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
-import { cachedJson } from "@/shared/utils/cachedJson";
+import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
+import useConnectionEvents from "@/shared/hooks/useConnectionEvents";
 import ModelRow from "./ModelRow";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
@@ -227,9 +228,34 @@ export default function ProviderDetailPage() {
     }
   }, []);
 
-  // Models discovered by provider sync. These belong in the Available Models
-  // list and in the Test all scope, otherwise a synced model is only visible
-  // inside the sync panel and cannot be batch-tested.
+  // Persisted test results (survive reloads). In-session results set by
+  // single/batch tests below always win over these when both exist.
+  const fetchPersistedTestResults = useCallback(async (alias) => {
+    if (!alias) return;
+    try {
+      const res = await fetch(`/api/models/test-results?providerAlias=${encodeURIComponent(alias)}`, { cache: "no-store" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return;
+      const prefix = `${alias}/`;
+      const mapped = {};
+      for (const [full, rec] of Object.entries(data?.results || {})) {
+        if (typeof full !== "string" || !full.startsWith(prefix)) continue;
+        const id = full.slice(prefix.length);
+        const st = typeof rec === "string" ? rec : rec?.status;
+        if (st === "passed" || st === "ok") mapped[id] = "ok";
+        else if (st === "failed" || st === "timeout" || st === "error") mapped[id] = "error";
+      }
+      if (Object.keys(mapped).length > 0) {
+        setModelTestResults((prev) => ({ ...mapped, ...prev }));
+      }
+    } catch (error) {
+      console.log("Error fetching persisted test results:", error);
+    }
+  }, []);
+
+  // Models discovered by provider sync. The Discovered section inside
+  // ModelSyncPanel owns these; the Added list below must NOT merge them in,
+  // otherwise added models render twice and sync looks like it duplicates.
   const fetchSyncedModels = useCallback(async (alias) => {
     if (!alias) { setSyncedModels([]); return; }
     try {
@@ -302,6 +328,27 @@ export default function ProviderDetailPage() {
       setLoading(false);
     }
   }, [providerId, isCompatible]);
+
+  // Live status: connection tests, runtime errors, OAuth refreshes and CRUD
+  // arrive as SSE events; refetch connections without a page reload.
+  const refetchTimer = useRef(null);
+  const refetchConnectionsSoon = useCallback(() => {
+    clearTimeout(refetchTimer.current);
+    refetchTimer.current = setTimeout(fetchConnections, 150); // coalesce bursts
+  }, [fetchConnections]);
+  useEffect(() => () => clearTimeout(refetchTimer.current), []);
+  useConnectionEvents({
+    onEvent: useCallback((event) => {
+      if (!event) return;
+      const affectsThisProvider = event.provider === providerId || event.id === "*";
+      if (!affectsThisProvider) return;
+      if (event.type === "created" || event.type === "deleted" || event.id === "*") {
+        invalidateCache("/api/providers");
+      }
+      refetchConnectionsSoon();
+    }, [providerId, refetchConnectionsSoon]),
+    onRevision: refetchConnectionsSoon,
+  });
 
   const handleUpdateNode = async (formData) => {
     try {
@@ -395,7 +442,8 @@ export default function ProviderDetailPage() {
     fetchAliases();
     fetchDisabledModels();
     fetchSyncedModels(providerStorageAlias);
-  }, [fetchConnections, fetchAliases, fetchDisabledModels, fetchSyncedModels, providerStorageAlias]);
+    fetchPersistedTestResults(providerStorageAlias);
+  }, [fetchConnections, fetchAliases, fetchDisabledModels, fetchSyncedModels, fetchPersistedTestResults, providerStorageAlias]);
 
   // Fetch suggested models from provider's public API (if configured)
   useEffect(() => {
@@ -947,24 +995,24 @@ export default function ProviderDetailPage() {
           onDeleteAlias={handleDeleteAlias}
           connections={connections}
           isAnthropic={isAnthropicCompatible}
+          syncedModels={syncedModels}
+          testResults={modelTestResults}
+          onTestModel={handleTestModel}
+          batchTestingIds={batchTestingIds}
+          isFreeNoAuth={isFreeNoAuth}
         />
       );
     }
-    // Combine hardcoded models with Kilo free models and sync-discovered
-    // models (all deduplicated by exact model id). Sync-discovered models must
-    // appear here — not only inside the sync panel — so they are visible and
-    // batch-testable from the same list.
+    // Added models only: built-ins + Kilo free + aliases. Sync-discovered
+    // models that have NOT been added live exclusively in the Discovered
+    // section of the sync panel (stable identity: storageAlias + upstream id).
+    // Previously they were merged here too, so added models rendered twice.
     // Filter models to only those matching this provider's service kinds
     const providerServiceKinds = AI_PROVIDERS[providerId]?.serviceKinds || ["llm"];
     const isLlmProvider = providerServiceKinds.includes("llm");
-    const discoveredModels = syncedModels
-      .filter((m) => m.storageAlias === providerStorageAlias || m.providerAlias === providerStorageAlias)
-      .map((m) => ({ id: m.id, name: m.name || m.id, type: m.type || "llm", isFree: !!m.isFree }));
     const allModels = [
       ...models,
       ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
-      ...discoveredModels.filter((dm) => !models.some((m) => m.id === dm.id)
-        && !kiloFreeModels.some((fm) => fm.id === dm.id)),
     ].filter((m) => {
       // Models without type are LLM
       const modelType = m.type || "llm";
@@ -1717,18 +1765,18 @@ export default function ProviderDetailPage() {
         {!!modelsTestError && (
           <p className="text-xs text-red-500 mb-3 break-words">{modelsTestError}</p>
         )}
-        {!isCompatible && (
-          <ModelSyncPanel
-            providerId={providerId}
-            providerStorageAlias={providerStorageAlias}
-            providerLabel={providerInfo?.name}
-            connections={connections}
-            modelAliases={modelAliases}
-            hardcodedIds={models.map((m) => m.id)}
-            onAddModel={(modelId) => handleSetAlias(modelId, modelId.split("/").pop(), providerStorageAlias)}
-            onCatalogChanged={() => { fetchAliases(); fetchSyncedModels(providerStorageAlias); }}
-          />
-        )}
+        <ModelSyncPanel
+          providerId={providerId}
+          providerStorageAlias={providerStorageAlias}
+          providerLabel={providerNode?.name || providerInfo?.name}
+          connections={connections}
+          modelAliases={modelAliases}
+          hardcodedIds={models.map((m) => m.id)}
+          testResults={modelTestResults}
+          disabledIds={disabledModelIds}
+          onAddModel={(modelId) => handleSetAlias(modelId, modelId.split("/").pop(), providerStorageAlias)}
+          onCatalogChanged={() => { fetchAliases(); fetchSyncedModels(providerStorageAlias); fetchDisabledModels(); }}
+        />
         {renderModelsSection()}
       </Card>
 

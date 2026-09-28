@@ -253,6 +253,50 @@ export default function PlaygroundPage() {
           }
         }));
 
+        // Sync-discovered + manual-alias models for OpenAI/Anthropic-compatible
+        // nodes. Their connections' live /models fetch covers the current
+        // upstream list, but the synced catalog also carries models the upstream
+        // no longer lists (e.g. offline gateways) plus manual entries — include
+        // them so "All providers" and model selection never drop them.
+        try {
+          const [syncRes, aliasRes] = await Promise.all([
+            fetch("/api/models/synced", { cache: "no-store" }).catch(() => null),
+            fetch("/api/models/alias", { cache: "no-store" }).catch(() => null),
+          ]);
+          const synced = syncRes?.ok ? (await syncRes.json().catch(() => ({}))).models || [] : [];
+          const aliases = aliasRes?.ok ? (await aliasRes.json().catch(() => ({}))).aliases || {} : {};
+          for (const m of synced) {
+            if (!m?.id || m.stale) continue;
+            if (!isChatModel({ id: m.id, type: m.type || "llm" })) continue;
+            const storageAlias = m.storageAlias || m.providerAlias;
+            if (!storageAlias) continue;
+            // Only for compatible/custom nodes (built-in providers already got
+            // their synced models via the connection fetch above).
+            const isCustomNode = storageAlias.startsWith("openai-compatible-")
+              || storageAlias.startsWith("anthropic-compatible-")
+              || storageAlias.startsWith("custom-embedding-");
+            if (!isCustomNode) continue;
+            if (!connections.some((c) => (c.provider || c.id) === storageAlias)) continue;
+            const group = ensureGroup(storageAlias);
+            addModel(group, m.id, m.name || m.id, `${storageAlias}/${m.id}`);
+          }
+          for (const [aliasName, fullModel] of Object.entries(aliases)) {
+            if (typeof fullModel !== "string") continue;
+            const slash = fullModel.indexOf("/");
+            if (slash <= 0) continue;
+            const storageAlias = fullModel.slice(0, slash);
+            const isCustomNode = storageAlias.startsWith("openai-compatible-")
+              || storageAlias.startsWith("anthropic-compatible-")
+              || storageAlias.startsWith("custom-embedding-");
+            if (!isCustomNode) continue;
+            if (!connections.some((c) => (c.provider || c.id) === storageAlias)) continue;
+            const rawId = fullModel.slice(slash + 1);
+            if (!rawId) continue;
+            const group = ensureGroup(storageAlias);
+            addModel(group, rawId, aliasName, fullModel);
+          }
+        } catch { /* best-effort enrichment */ }
+
         // Canonical eligible-working-models list (shared definition with the
         // Models Working filter). Used for working-only mode so header count
         // and dropdown always match. Falls back to client-side filtering.

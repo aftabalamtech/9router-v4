@@ -1,0 +1,187 @@
+// Client-side mirror of backend/src/lib/models/autoAdd.js.
+// Reuses the shared eligibility vocabulary (getTestStatus) so the provider
+// page classifies working/error/untested exactly like the Models page.
+// Pure functions only — safe for `node --test`.
+import { getTestStatus } from "./modelEligibility.js";
+
+export const AUTO_ADD_POLICIES = Object.freeze([
+  "working-only",
+  "working-disable-failed",
+  "working-ignore-failed",
+]);
+
+export const AUTO_ADD_POLICY_LABELS = Object.freeze({
+  "working-only": "Only add working models",
+  "working-disable-failed": "Add working models and disable failed models",
+  "working-ignore-failed": "Add working models; ignore failed models",
+});
+
+export const AUTO_ADD_POLICY_DESCRIPTIONS = Object.freeze({
+  "working-only":
+    "Automatically add models whose latest test passed. Failed or untested models stay in the discovered catalog.",
+  "working-disable-failed":
+    "Automatically add working models. Failed models stay in the catalog and are placed in Disabled models so they cannot be routed to.",
+  "working-ignore-failed":
+    "Automatically add working models. Failed models are left untouched in the discovered catalog for manual review.",
+});
+
+export function normalizeAutoAddPolicy(value, fallback = "working-only") {
+  return AUTO_ADD_POLICIES.includes(value) ? value : fallback;
+}
+
+export function stableModelId(id) {
+  if (typeof id !== "string") return "";
+  return id.trim().slice(0, 200);
+}
+
+export function dedupeDiscovered(entries) {
+  const byId = new Map();
+  for (const entry of entries || []) {
+    const id = stableModelId(entry?.id);
+    if (!id) continue;
+    if (!byId.has(id)) byId.set(id, { ...entry, id });
+  }
+  return [...byId.values()];
+}
+
+function fullModelOf(storageAlias, id) {
+  return `${storageAlias}/${id}`;
+}
+
+// testResults here use the provider-page mapping: { [bareId]: "ok" | "error" }.
+export function partitionDiscovered({
+  catalog,
+  storageAlias,
+  modelAliases,
+  hardcodedIds,
+}) {
+  const addedFullModels = new Set(
+    Object.values(modelAliases || {}).filter((v) => typeof v === "string")
+  );
+  const hardcoded = new Set(hardcodedIds || []);
+  const rows = [];
+  for (const entry of dedupeDiscovered(catalog || [])) {
+    if (entry?.stale) continue;
+    const fullModel = fullModelOf(storageAlias, entry.id);
+    const isAdded = addedFullModels.has(fullModel) || hardcoded.has(entry.id);
+    rows.push({
+      ...entry,
+      storageAlias,
+      fullModel,
+      isAdded,
+      isManual: Boolean(entry?.manual) || addedFullModels.has(fullModel),
+    });
+  }
+  return {
+    rows,
+    added: rows.filter((r) => r.isAdded),
+    discovered: rows.filter((r) => !r.isAdded),
+  };
+}
+
+function matchesSearch(row, search) {
+  const q = String(search || "").trim().toLowerCase();
+  if (!q) return true;
+  return (
+    String(row?.id || "").toLowerCase().includes(q) ||
+    String(row?.name || "").toLowerCase().includes(q)
+  );
+}
+
+function matchesPrice(row, price) {
+  if (price === "free") return row?.isFree === true;
+  if (price === "paid") return row?.isFree !== true;
+  return true;
+}
+
+function matchesStatus(row, status, { testResults, disabledIds }) {
+  const testStatus = getTestStatus(row.id, testResults);
+  const disabled = (disabledIds || []).includes(row.id);
+  switch (status) {
+    case "working":
+      return testStatus === "ok" && !disabled;
+    case "error":
+      return testStatus === "error";
+    case "disabled":
+      return disabled;
+    case "all":
+    default:
+      return true;
+  }
+}
+
+export function filterDiscovered(
+  rows,
+  { search = "", status = "all", price = "all", testResults, disabledIds } = {}
+) {
+  const list = Array.isArray(rows) ? rows : [];
+  const ctx = { testResults, disabledIds };
+  const base = list.filter(
+    (r) => matchesSearch(r, search) && matchesPrice(r, price) && matchesStatus(r, status, ctx)
+  );
+  const searchOnly = list.filter((r) => matchesSearch(r, search));
+  const statusBase = searchOnly.filter((r) => matchesPrice(r, price));
+  const priceBase = searchOnly.filter((r) => matchesStatus(r, status, ctx));
+  const countBy = (arr, fn) => arr.filter(fn).length;
+  const counts = {
+    all: searchOnly.filter((r) => matchesPrice(r, price)).length,
+    working: countBy(statusBase, (r) => matchesStatus(r, "working", ctx)),
+    error: countBy(statusBase, (r) => matchesStatus(r, "error", ctx)),
+    disabled: countBy(statusBase, (r) => matchesStatus(r, "disabled", ctx)),
+    free: countBy(priceBase, (r) => matchesPrice(r, "free")),
+    paid: countBy(priceBase, (r) => matchesPrice(r, "paid")),
+  };
+  return { rows: base, counts };
+}
+
+export function resolveBulkAdd(filteredRows) {
+  const targets = [];
+  const skipped = [];
+  for (const row of filteredRows || []) {
+    const id = stableModelId(row?.id);
+    if (!id) continue;
+    if (row?.isAdded) skipped.push(id);
+    else targets.push(id);
+  }
+  return { targets, skipped };
+}
+
+export function resolveDisableNotAdded(
+  filteredRows,
+  { disabledIds, hardcodedIds } = {}
+) {
+  const disabled = new Set(disabledIds || []);
+  const hardcoded = new Set(hardcodedIds || []);
+  const out = [];
+  for (const row of filteredRows || []) {
+    const id = stableModelId(row?.id);
+    if (!id || row?.isAdded || hardcoded.has(id) || disabled.has(id)) continue;
+    out.push(id);
+  }
+  return out;
+}
+
+// discoveredRows: UNADDED rows with bare-id testResults.
+// Never re-enables; never adds failed/untested unless allowed.
+export function resolveAutoAdd({
+  discoveredRows,
+  testResults,
+  disabledIds,
+  policy = "working-only",
+  includeUntested = false,
+} = {}) {
+  const disabled = new Set(disabledIds || []);
+  const toAdd = [];
+  const toDisable = [];
+  const effective = normalizeAutoAddPolicy(policy, "working-only");
+  for (const row of discoveredRows || []) {
+    const id = stableModelId(row?.id);
+    if (!id || row?.isAdded || disabled.has(id)) continue;
+    const status = getTestStatus(id, testResults);
+    if (status === "ok") toAdd.push(id);
+    else if (status === "error") {
+      if (effective === "working-disable-failed") toDisable.push(id);
+    } else if (includeUntested) toAdd.push(id);
+  }
+  return { toAdd, toDisable };
+}

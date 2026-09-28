@@ -3,6 +3,7 @@ import { getDisabledModels } from "../db/index.js";
 import { getCustomModels, getModelAliases } from "../db/index.js";
 import { getModelTestResults } from "./modelTestRepo.js";
 import { getProviderConnections } from "../localDb.js";
+import { getSyncedModels } from "./modelSync.js";
 import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS } from "../../../open-sse/config/providerModels.js";
 import { AI_PROVIDERS, FREE_PROVIDERS, getProviderAlias } from "../../shared/constants/providers.js";
 
@@ -92,13 +93,16 @@ function isChatKind(model) {
  */
 export async function getWorkingModels(options = {}) {
   const { providerAlias = null } = options || {};
-  const [connections, customModels, modelAliases, hidden, blocks, results] = await Promise.all([
+  const [connections, customModels, modelAliases, hidden, blocks, results, synced] = await Promise.all([
     getProviderConnections().catch(() => []),
     getCustomModels().catch(() => []),
     getModelAliases().catch(() => ({})),
     getDisabledModels().catch(() => ({})),
     loadBlocks(),
     getModelTestResults().catch(() => ({})),
+    // Sync-discovered models (OpenAI/Anthropic-compatible nodes have no static
+    // catalog — without this their models could never appear as working).
+    getSyncedModels(null).catch(() => ({})),
   ]);
 
   const connected = new Set(
@@ -142,6 +146,19 @@ export async function getWorkingModels(options = {}) {
     if (!isChatKind({ id: m.id, type: m.type || "llm" })) continue;
     consider(pid, m.id, m.name || m.id);
   }
+  // Sync-discovered catalog: keyed "storageAlias|modelId". Compatible-provider
+  // nodes store models under the node id (providerId === storageAlias), so the
+  // connection check below works unchanged.
+  for (const record of Object.values(synced || {})) {
+    if (!record || !record.id || record.stale) continue;
+    const storageAlias = record.storageAlias || record.providerAlias;
+    if (!storageAlias) continue;
+    const pid = Object.keys(AI_PROVIDERS).find((k) => (getProviderAlias(k) || k) === storageAlias) || storageAlias;
+    if (!eligibleProvider(pid)) continue;
+    if (!isChatKind({ id: record.id, type: record.type || "llm" })) continue;
+    consider(pid, record.id, record.name || record.id);
+  }
+
   for (const [aliasName, fullModel] of Object.entries(modelAliases || {})) {
     if (typeof fullModel !== "string" || !fullModel.includes("/")) continue;
     const { alias, id } = splitModelRef(fullModel);

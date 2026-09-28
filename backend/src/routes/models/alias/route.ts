@@ -1,5 +1,6 @@
 
 import { getModelAliases, setModelAlias, deleteModelAlias } from "../../../models/index.js";
+import { resolveBulkAliasEntries } from "../../../lib/models/autoAdd.js";
 
 export const dynamic = "force-dynamic";
 
@@ -30,6 +31,39 @@ export async function PUT_handler(req, res) {
   } catch (error) {
     console.log("Error updating alias:", error);
     return res.status(500).json({ error: "Failed to update alias" });
+  }
+}
+
+// POST /api/models/alias - Bulk-add models (the "Add All Models" target).
+// Body: { models: [{ model, alias }] }. Idempotent: entries whose alias or
+// full-model value already exists are skipped, never overwritten, so manual
+// configuration is preserved and repeated calls are safe. Alias collisions
+// (same alias, different model) are reported as failed, not silently resolved.
+export async function POST_handler(req, res) {
+  try {
+    const { models } = req.body || {};
+    if (!Array.isArray(models)) {
+      return res.status(400).json({ error: "models must be an array" });
+    }
+    if (models.length > 2000) {
+      return res.status(400).json({ error: "Too many models (max 2000)" });
+    }
+    const existing = await getModelAliases();
+    const { toAdd, skipped, failed: preFailed } = resolveBulkAliasEntries(models, existing || {});
+    let added = 0;
+    let failed = preFailed;
+    for (const { model, alias } of toAdd) {
+      try {
+        await setModelAlias(alias, model);
+        added += 1;
+      } catch {
+        failed += 1;
+      }
+    }
+    return res.json({ success: true, added, skipped, failed });
+  } catch (error) {
+    console.log("Error bulk-adding aliases:", error);
+    return res.status(500).json({ error: "Failed to bulk-add models" });
   }
 }
 

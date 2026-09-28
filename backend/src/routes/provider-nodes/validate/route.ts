@@ -67,13 +67,16 @@ const isReachableInferenceStatus = (status) => !isAuthFailure(status) && status 
 const trimBaseUrl = (baseUrl) => baseUrl.trim().replace(/\/$/, "");
 
 // POST /api/provider-nodes/validate - Validate API key against base URL
+// API key is OPTIONAL: self-hosted gateways (LM Studio, Ollama OpenAI shim,
+// LiteLLM, vLLM…) frequently run unauthenticated. An empty key must validate
+// against /models instead of being rejected up front.
 export async function POST_handler(req, res) {
   try {
     const body = req.body;
     const { baseUrl, apiKey, type, modelId } = body;
 
-    if (!baseUrl || !apiKey) {
-      return res.status(400).json({ error: "Base URL and API key required" });
+    if (!baseUrl) {
+      return res.status(400).json({ error: "Base URL is required" });
     }
 
     // Validate URL format
@@ -174,14 +177,40 @@ export async function POST_handler(req, res) {
     // OpenAI Compatible Validation (Default)
     const normalizedBase = trimBaseUrl(baseUrl);
     const modelsUrl = `${normalizedBase}/models`;
-    const res = await fetchWithTimeout(modelsUrl, {
-      headers: { "Authorization": `Bearer ${apiKey}` },
-    });
+    const requestHeaders: Record<string, string> = {};
+    if (apiKey) requestHeaders["Authorization"] = `Bearer ${apiKey}`;
+    const res = await fetchWithTimeout(modelsUrl, { headers: requestHeaders });
 
-    if (res.ok) return res.json({ valid: true });
+    if (res.ok) {
+      // Surface the discovered model list so the caller can offer one-click
+      // import right after a successful Test Connection.
+      let models: Array<{ id: string; name?: string }> = [];
+      try {
+        const data = await res.json();
+        const raw = Array.isArray(data) ? data : (data?.data || data?.models || data?.results || []);
+        if (Array.isArray(raw)) {
+          models = raw
+            .map((m: { id?: unknown; name?: unknown; model?: unknown }) => {
+              const id = typeof m === "string" ? m : (m?.id || m?.model || "");
+              if (!id || typeof id !== "string") return null;
+              const name = typeof m === "object" && m && typeof (m as { name?: unknown }).name === "string" ? (m as { name: string }).name : id;
+              return { id, name };
+            })
+            .filter(Boolean)
+            .slice(0, 500);
+        }
+      } catch { /* body wasn't JSON — validation still succeeded */ }
+      return res.json({ valid: true, method: "models", models });
+    }
 
     if (isAuthFailure(res.status)) {
       return res.json({ valid: false, error: "API key unauthorized" });
+    }
+
+    // Some gateways reject GET /models with 405 (method not allowed) even
+    // though they serve chat — treat that as "reachable, no listing".
+    if (res.status === 405) {
+      return res.json({ valid: true, method: "no-models", models: [], warning: "Upstream has no /models endpoint — add model IDs manually." });
     }
 
     // Fallback: try chat/completions if modelId provided

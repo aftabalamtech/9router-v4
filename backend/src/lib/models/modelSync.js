@@ -3,6 +3,9 @@ import { randomUUID } from "node:crypto";
 import { makeKv } from "../db/helpers/kvStore.js";
 import { getProviderConnections } from "../localDb.js";
 import { fetchConnectionModels, mergeConnectionModels } from "./modelDiscovery.js";
+import { normalizeSyncSettings, normalizeAutoAddPolicy } from "./autoAdd.js";
+
+export { normalizeSyncSettings, normalizeAutoAddPolicy };
 
 export const SYNC_CONCURRENCY = 2;
 export const SYNC_TIMEOUT_MS = 45000;
@@ -18,16 +21,18 @@ export function syncedKey(storageAlias, modelId) {
 }
 
 export async function getSyncSettings(providerId) {
-  return (await settingsKv.get(providerId, null)) || { autoFetch: false, autoSync: false, lastSyncAt: null };
+  return normalizeSyncSettings(await settingsKv.get(providerId, null));
 }
 
 export async function updateSyncSettings(providerId, patch) {
   const current = await getSyncSettings(providerId);
-  const next = {
-    autoFetch: typeof patch?.autoFetch === "boolean" ? patch.autoFetch : current.autoFetch,
-    autoSync: typeof patch?.autoSync === "boolean" ? patch.autoSync : current.autoSync,
-    lastSyncAt: current.lastSyncAt || null,
-  };
+  const clean = {};
+  for (const [key, value] of Object.entries(patch || {})) {
+    if (value !== undefined) clean[key] = value;
+  }
+  // lastSyncAt is append-only metadata: only markSyncTimestamp() may set it,
+  // so a settings PATCH can never wipe or forge it.
+  const next = normalizeSyncSettings({ ...current, ...clean, lastSyncAt: current.lastSyncAt || null });
   await settingsKv.set(providerId, next);
   return next;
 }

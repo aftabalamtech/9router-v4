@@ -2,6 +2,15 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import PropTypes from "prop-types";
 import { Button } from "@/shared/components";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
+import DiscoveredModelsSection from "./DiscoveredModelsSection";
+import {
+  AUTO_ADD_POLICIES,
+  AUTO_ADD_POLICY_LABELS,
+  AUTO_ADD_POLICY_DESCRIPTIONS,
+  normalizeAutoAddPolicy,
+  resolveAutoAdd,
+  stableModelId,
+} from "@/shared/utils/discoveredModels";
 
 const POLL_INTERVAL_MS = 2500;
 const AUTO_SYNC_COOLDOWN_MS = 60 * 60 * 1000;
@@ -28,24 +37,31 @@ function formatElapsed(ms) {
 //   connections: provider connections (active ones are eligible)
 //   modelAliases: { alias: fullModel } (manual store — never modified here)
 //   hardcodedIds: built-in model ids for this provider
+//   testResults: { [bareModelId]: "ok" | "error" } latest valid tests
+//   disabledIds: model ids currently in the Disabled system
 //   onAddModel(modelId): add a discovered model (creates alias)
 //   onCatalogChanged(): refresh parent lists after sync/clear
 export default function ModelSyncPanel({
   providerId, providerStorageAlias, providerLabel,
-  connections, modelAliases, hardcodedIds, onAddModel, onCatalogChanged,
+  connections, modelAliases, hardcodedIds, testResults, disabledIds,
+  onAddModel, onCatalogChanged,
 }) {
-  const [settings, setSettings] = useState({ autoFetch: false, autoSync: false, lastSyncAt: null });
+  const [settings, setSettings] = useState({ autoFetch: false, autoSync: false, lastSyncAt: null, autoAdd: false, autoAddPolicy: "working-only", includeUntested: false });
   const [status, setStatus] = useState({ syncedCount: 0, staleCount: 0 });
   const [catalog, setCatalog] = useState([]);
   const [job, setJob] = useState(null);
   const [error, setError] = useState("");
-  const [importing, setImporting] = useState(false);
+  const [autoAddSummary, setAutoAddSummary] = useState(null);
+  const [showAutoAddMenu, setShowAutoAddMenu] = useState(false);
   const esRef = useRef(null);
   const pollRef = useRef(null);
   const activeRef = useRef(false);
   const autoRanRef = useRef({ fetch: false, sync: false });
+  const autoAppliedRef = useRef({}); // jobId -> true (auto-add runs once per sync)
   const onCatalogChangedRef = useRef(onCatalogChanged);
   onCatalogChangedRef.current = onCatalogChanged;
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
   const base = `/api/providers/${encodeURIComponent(providerId)}/sync-models`;
   const storageQuery = `?storageAlias=${encodeURIComponent(providerStorageAlias)}`;
@@ -71,17 +87,112 @@ export default function ModelSyncPanel({
 
   useEffect(() => { refreshStatus(true); }, [refreshStatus]);
 
+  const applyAutoAdd = useCallback(async (jobId) => {
+    // Auto-Add runs once per finished sync job, using the latest persisted
+    // test results (never force-testing the catalog here — that would hammer
+    // upstream providers). Manual models and manual disables are preserved:
+    // resolution only ever creates aliases or disables failed discoveries.
+    if (!jobId || autoAppliedRef.current[jobId]) return;
+    autoAppliedRef.current[jobId] = true;
+    const s = settingsRef.current;
+    if (!s.autoAdd) return;
+    try {
+      const res = await fetch(`/api/models/test-results?providerAlias=${encodeURIComponent(providerStorageAlias)}`, { cache: "no-store" });
+      const data = await res.json().catch(() => ({}));
+      const persisted = data?.results || {};
+      const bareResults = {};
+      const prefix = `${providerStorageAlias}/`;
+      for (const [full, rec] of Object.entries(persisted)) {
+        const st = typeof rec === "string" ? rec : rec?.status;
+        const id = typeof full === "string" && full.startsWith(prefix) ? full.slice(prefix.length) : null;
+        if (!id) continue;
+        if (st === "passed" || st === "ok") bareResults[id] = "ok";
+        else if (st === "failed" || st === "timeout" || st === "error") bareResults[id] = "error";
+      }
+      // In-session results (parent) win over persisted ones.
+      const merged = { ...bareResults, ...(testResultsRef.current || {}) };
+      const addedFull = new Set(Object.values(modelAliasesRef.current || {}).filter((v) => typeof v === "string"));
+      const hardcoded = new Set(hardcodedIdsRef.current || []);
+      const seen = new Set();
+      const unadded = [];
+      for (const m of catalogRef.current || []) {
+        const id = stableModelId(m?.id);
+        if (!id || m?.stale || seen.has(id)) continue;
+        seen.add(id);
+        if (addedFull.has(`${providerStorageAlias}/${id}`) || hardcoded.has(id)) continue;
+        unadded.push({ ...m, id, fullModel: `${providerStorageAlias}/${id}` });
+      }
+      // Rows carry bare ids; the resolver reads test status by bare id.
+      const rowsForPolicy = unadded.map((r) => ({ id: r.id, isAdded: false }));
+      const { toAdd, toDisable } = resolveAutoAdd({
+        discoveredRows: rowsForPolicy,
+        testResults: merged,
+        disabledIds: disabledIdsRef.current || [],
+        policy: normalizeAutoAddPolicy(s.autoAddPolicy),
+        includeUntested: !!s.includeUntested,
+      });
+      let added = 0;
+      let failed = 0;
+      if (toAdd.length > 0) {
+        const payload = toAdd.map((id) => ({
+          model: `${providerStorageAlias}/${id}`,
+          alias: String(id).split("/").pop() || id,
+        }));
+        try {
+          const r = await fetch("/api/models/alias", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ models: payload }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.error || "Auto-add failed");
+          added = d.added || 0;
+          failed = d.failed || 0;
+        } catch {
+          // Fallback: existing single-add path, one by one.
+          for (const id of toAdd) {
+            try {
+              await onAddModelRef.current?.(id);
+              added += 1;
+            } catch {
+              failed += 1;
+            }
+          }
+        }
+      }
+      let disabled = 0;
+      if (toDisable.length > 0) {
+        const r = await fetch("/api/models/disabled", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ providerAlias: providerStorageAlias, ids: toDisable }),
+        });
+        if (r.ok) disabled = toDisable.length;
+      }
+      if (toAdd.length > 0 || toDisable.length > 0) {
+        setAutoAddSummary({ added, failed, disabled, policy: normalizeAutoAddPolicy(s.autoAddPolicy) });
+        onCatalogChangedRef.current?.();
+      }
+    } catch (e) {
+      setAutoAddSummary({ added: 0, failed: 0, disabled: 0, policy: normalizeAutoAddPolicy(settingsRef.current.autoAddPolicy), error: e?.message || "Auto-add failed" });
+    }
+  }, [providerStorageAlias]);
+
   const applySnapshot = useCallback((snapshot) => {
     if (!snapshot) return;
     setJob((j) => (j ? { ...j, ...snapshot, finished: snapshot.status !== "running" } : j));
     if (snapshot.status !== "running") {
       activeRef.current = false;
-      setImporting(false);
       stopTransports();
       refreshStatus(true);
       onCatalogChangedRef.current?.();
+      const finishedId = snapshot.jobId;
+      if (settingsRef.current.autoAdd && finishedId) {
+        // Defer one tick so the refreshed catalog state has landed.
+        setTimeout(() => applyAutoAdd(finishedId), 0);
+      }
     }
-  }, [refreshStatus, stopTransports]);
+  }, [refreshStatus, stopTransports, applyAutoAdd]);
 
   const pollSnapshot = useCallback(async (jobId) => {
     try {
@@ -121,12 +232,26 @@ export default function ModelSyncPanel({
 
   const manualIds = useManualIds(modelAliases, providerStorageAlias);
 
-  const startSync = useCallback(async ({ importAll } = {}) => {
+  // Refs for async callbacks (avoid stale closures across long sync jobs).
+  const modelAliasesRef = useRef(modelAliases);
+  modelAliasesRef.current = modelAliases;
+  const onAddModelRef = useRef(onAddModel);
+  onAddModelRef.current = onAddModel;
+  const testResultsRef = useRef(testResults);
+  testResultsRef.current = testResults;
+  const disabledIdsRef = useRef(disabledIds);
+  disabledIdsRef.current = disabledIds;
+  const hardcodedIdsRef = useRef(hardcodedIds);
+  hardcodedIdsRef.current = hardcodedIds;
+  const catalogRef = useRef(catalog);
+  catalogRef.current = catalog;
+
+  const startSync = useCallback(async () => {
     if (activeRef.current) return null;
     setError("");
+    setAutoAddSummary(null);
     activeRef.current = true;
-    if (importAll) setImporting(true);
-    setJob({ status: "running", summary: null, connections: [], current: null, startedAt: Date.now(), finished: false, importAll: !!importAll });
+    setJob({ status: "running", summary: null, connections: [], current: null, startedAt: Date.now(), finished: false });
     try {
       const res = await fetch(base, {
         method: "POST",
@@ -142,57 +267,10 @@ export default function ModelSyncPanel({
     } catch (e) {
       setError(e.message);
       activeRef.current = false;
-      setImporting(false);
       setJob(null);
       return null;
     }
   }, [base, providerStorageAlias, manualIds, subscribe, pollSnapshot]);
-
-  // Import from /models: sync, then add every discovered model as an alias.
-  const handleImport = useCallback(async () => {
-    if (activeRef.current || importing) return;
-    const jobId = await startSync({ importAll: true });
-    if (!jobId) return;
-    // Wait for completion, then add all fresh discoveries.
-    const wait = async () => {
-      for (let i = 0; i < 120; i += 1) {
-        await new Promise((r) => setTimeout(r, 2000));
-        try {
-          const res = await fetch(`${base}/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
-          if (!res.ok) continue;
-          const snap = await res.json();
-          if (snap.status !== "running") {
-            await refreshStatus(true);
-            try {
-              const cat = await (await fetch(`${base}${storageQuery}&include=catalog`, { cache: "no-store" })).json();
-              const added = new Set(Object.values(modelAliasesRef.current || {}));
-              let n = 0;
-              for (const m of cat.catalog || []) {
-                if (m.stale) continue;
-                const full = `${providerStorageAlias}/${m.id}`;
-                if (added.has(full)) continue;
-                await onAddModelRef.current?.(m.id);
-                added.add(full);
-                n += 1;
-              }
-              if (n === 0) setError("No new models were added.");
-            } catch (e) {
-              setError(e.message);
-            }
-            onCatalogChangedRef.current?.();
-            return;
-          }
-        } catch { /* keep waiting */ }
-      }
-      setError("Import timed out waiting for sync.");
-    };
-    wait();
-  }, [base, storageQuery, providerStorageAlias, startSync, importing, refreshStatus]);
-
-  const modelAliasesRef = useRef(modelAliases);
-  modelAliasesRef.current = modelAliases;
-  const onAddModelRef = useRef(onAddModel);
-  onAddModelRef.current = onAddModel;
 
   const handleCancel = useCallback(async () => {
     const jobId = job?.jobId;
@@ -227,17 +305,25 @@ export default function ModelSyncPanel({
         body: JSON.stringify({ [key]: next }),
       });
       const data = await res.json().catch(() => ({}));
-      if (data.settings) setSettings(data.settings);
+      if (data.settings) setSettings((s) => ({ ...s, ...data.settings }));
     } catch {
       setSettings((s) => ({ ...s, [key]: !next }));
     }
   }, [base, settings]);
 
-  const addedFullModels = useAddedSet(modelAliases);
-  const hardcodedSet = useMemo(() => new Set(hardcodedIds || []), [hardcodedIds]);
-  const addable = catalog.filter((m) => !m.stale
-    && !addedFullModels.has(`${providerStorageAlias}/${m.id}`)
-    && !hardcodedSet.has(m.id));
+  const setAutoAddPolicy = useCallback(async (policy) => {
+    const value = normalizeAutoAddPolicy(policy);
+    setSettings((s) => ({ ...s, autoAddPolicy: value }));
+    try {
+      const res = await fetch(base, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autoAddPolicy: value }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.settings) setSettings((s) => ({ ...s, ...data.settings }));
+    } catch { /* keep optimistic value */ }
+  }, [base]);
 
   const activeConnections = (connections || []).filter((c) => c.isActive !== false);
   // Credential-free providers (opencode, local-device, local TTS, searxng) are
@@ -293,6 +379,68 @@ export default function ModelSyncPanel({
           </span>
           Auto-Sync
         </button>
+        <div className="relative">
+          <div
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border transition-colors ${settings.autoAdd ? "border-primary text-primary" : "border-border text-text-muted"}`}
+            title="Automatically add newly discovered models after each sync, using the selected policy"
+          >
+            <button
+              onClick={() => toggleSetting("autoAdd")}
+              className="flex items-center gap-1.5"
+              aria-label="Toggle auto-add models"
+            >
+              <span className={`w-6 h-3.5 rounded-full relative transition-colors ${settings.autoAdd ? "bg-primary" : "bg-border"}`}>
+                <span className={`absolute top-0.5 w-2.5 h-2.5 rounded-full bg-white transition-all ${settings.autoAdd ? "left-3" : "left-0.5"}`} />
+              </span>
+              Auto-Add Models
+            </button>
+            <button
+              onClick={() => setShowAutoAddMenu((v) => !v)}
+              className="pl-1 text-text-muted hover:text-primary"
+              title="Auto-Add policy settings"
+              aria-label="Auto-Add policy settings"
+            >
+              <span className="material-symbols-outlined text-sm">expand_more</span>
+            </button>
+          </div>
+          {showAutoAddMenu && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setShowAutoAddMenu(false)} />
+              <div className="absolute z-50 mt-1 w-72 rounded-xl border border-border bg-background p-3 shadow-lg">
+                <p className="text-[11px] font-semibold text-text-main mb-2">
+                  Auto-Add policy ({AUTO_ADD_POLICY_LABELS[normalizeAutoAddPolicy(settings.autoAddPolicy)]})
+                </p>
+                <div className="flex flex-col gap-1.5">
+                  {AUTO_ADD_POLICIES.map((p) => (
+                    <button
+                      key={p}
+                      onClick={() => setAutoAddPolicy(p)}
+                      className={`text-left px-2 py-1.5 rounded-lg border text-[11px] transition-colors ${normalizeAutoAddPolicy(settings.autoAddPolicy) === p ? "border-primary text-primary bg-primary/5" : "border-border text-text-muted hover:text-text-main"}`}
+                    >
+                      <span className="font-medium block">{AUTO_ADD_POLICY_LABELS[p]}</span>
+                      <span className="opacity-80">{AUTO_ADD_POLICY_DESCRIPTIONS[p]}</span>
+                    </button>
+                  ))}
+                </div>
+                <label
+                  className="flex items-start gap-1.5 mt-2 text-[11px] text-text-muted cursor-pointer"
+                  title="Off by default. When on, discovered models with no test result are also added as working models."
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!settings.includeUntested}
+                    onChange={() => toggleSetting("includeUntested")}
+                    className="mt-0.5 accent-[var(--color-primary)]"
+                  />
+                  <span>Also add untested models <span className="opacity-70">(off by default)</span></span>
+                </label>
+                <p className="text-[10px] text-text-muted mt-2">
+                  Applies after each sync using the latest test results. Never duplicates, never re-enables manually disabled models.
+                </p>
+              </div>
+            </>
+          )}
+        </div>
         <button
           onClick={handleClear}
           disabled={running}
@@ -314,9 +462,6 @@ export default function ModelSyncPanel({
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="secondary" icon="sync" onClick={() => startSync()} disabled={!canSync || running}>
           {running ? "Syncing..." : "Sync now"}
-        </Button>
-        <Button size="sm" variant="secondary" icon="download" onClick={handleImport} disabled={!canSync || running || importing}>
-          {importing ? "Importing..." : "Import from /models"}
         </Button>
         {running && (
           <Button size="sm" variant="ghost" onClick={handleCancel}>Cancel</Button>
@@ -342,6 +487,15 @@ export default function ModelSyncPanel({
           {summary.stale > 0 && `, ${summary.stale} stale`}{summary.failed > 0 && `, ${summary.failed} failed`}.
         </p>
       )}
+      {autoAddSummary && (
+        <p className="text-[11px] text-text-muted">
+          Auto-Add ({AUTO_ADD_POLICY_LABELS[normalizeAutoAddPolicy(autoAddSummary.policy)]}): added {autoAddSummary.added}
+          {autoAddSummary.failed > 0 && `, ${autoAddSummary.failed} failed`}
+          {autoAddSummary.disabled > 0 && `, disabled ${autoAddSummary.disabled}`}
+          {autoAddSummary.added === 0 && autoAddSummary.disabled === 0 && !autoAddSummary.error && " — nothing new to add"}.
+          {autoAddSummary.error && <span className="text-red-500"> {autoAddSummary.error}</span>}
+        </p>
+      )}
       {job?.error && <p className="text-[11px] text-amber-500 break-words">{job.error}</p>}
       {error && (
         <div className="flex items-center gap-2">
@@ -350,25 +504,22 @@ export default function ModelSyncPanel({
         </div>
       )}
 
-      {addable.length > 0 && (
-        <div className="w-full mt-1">
-          <p className="text-[11px] text-text-muted mb-1.5">Discovered upstream ({addable.length}):</p>
-          <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">
-            {addable.slice(0, 200).map((m) => (
-              <button
-                key={m.id}
-                onClick={() => onAddModel(m.id)}
-                className="flex items-center gap-1 px-2 py-1 rounded-lg border border-black/10 dark:border-white/10 text-[11px] text-text-muted hover:text-primary hover:border-primary/40 hover:bg-primary/5 transition-colors"
-                title={[m.name, m.contextLength ? `${Math.round(m.contextLength / 1000)}k ctx` : null, m.isFree ? "free" : null].filter(Boolean).join(" · ")}
-              >
-                <span className="material-symbols-outlined text-[12px]">add</span>
-                {m.id}
-              </button>
-            ))}
-          </div>
-          {addable.length > 200 && <p className="text-[10px] text-text-muted mt-1">Showing first 200 of {addable.length}.</p>}
-        </div>
-      )}
+      {/* Discovered upstream catalog — strictly separate from added models.
+          Added/manual/built-in models render in the Added list; only
+          not-yet-added discoveries appear here. */}
+      <DiscoveredModelsSection
+        catalog={catalog}
+        storageAlias={providerStorageAlias}
+        modelAliases={modelAliases}
+        hardcodedIds={hardcodedIds}
+        testResults={testResults}
+        disabledIds={disabledIds}
+        onAddOne={onAddModel}
+        onChanged={() => {
+          refreshStatus(true);
+          onCatalogChangedRef.current?.();
+        }}
+      />
     </div>
   );
 }
@@ -388,13 +539,6 @@ function useManualIds(modelAliases, providerStorageAlias) {
   }, [modelAliases, providerStorageAlias]);
 }
 
-function useAddedSet(modelAliases) {
-  return useMemo(
-    () => new Set(Object.values(modelAliases || {}).filter((f) => typeof f === "string")),
-    [modelAliases]
-  );
-}
-
 ModelSyncPanel.propTypes = {
   providerId: PropTypes.string.isRequired,
   providerStorageAlias: PropTypes.string.isRequired,
@@ -402,6 +546,8 @@ ModelSyncPanel.propTypes = {
   connections: PropTypes.array,
   modelAliases: PropTypes.object,
   hardcodedIds: PropTypes.array,
+  testResults: PropTypes.object,
+  disabledIds: PropTypes.array,
   onAddModel: PropTypes.func.isRequired,
   onCatalogChanged: PropTypes.func,
 };

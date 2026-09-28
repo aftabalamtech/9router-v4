@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import PropTypes from "prop-types";
 import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal, ConfirmModal } from "@/shared/components";
 import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
+import useConnectionEvents from "@/shared/hooks/useConnectionEvents";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 
 // ── CooldownTimer ──────────────────────────────────────────────
@@ -30,7 +31,7 @@ function CooldownTimer({ until }) {
 CooldownTimer.propTypes = { until: PropTypes.string.isRequired };
 
 // ── ConnectionRow ──────────────────────────────────────────────
-function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete }) {
+function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, isChecking, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete }) {
   const [showProxyDropdown, setShowProxyDropdown] = useState(false);
   const [updatingProxy, setUpdatingProxy] = useState(false);
   const [isCooldown, setIsCooldown] = useState(false);
@@ -88,6 +89,7 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
   const effectiveStatus = connection.testStatus === "unavailable" && !isCooldown ? "active" : connection.testStatus;
 
   const getStatusVariant = () => {
+    if (isChecking) return "warning";
     if (connection.isActive === false) return "default";
     if (effectiveStatus === "active" || effectiveStatus === "success") return "success";
     if (effectiveStatus === "error" || effectiveStatus === "expired" || effectiveStatus === "unavailable") return "error";
@@ -120,7 +122,7 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
           <p className="text-sm font-medium truncate">{displayName}</p>
           <div className="flex flex-wrap items-center gap-2 mt-1">
             <Badge variant={getStatusVariant()} size="sm" dot>
-              {connection.isActive === false ? "disabled" : (effectiveStatus || "Unknown")}
+              {connection.isActive === false ? "disabled" : isChecking ? "checking" : (effectiveStatus || "Unknown")}
             </Badge>
             {hasAnyProxy && <Badge variant={proxyBadgeVariant} size="sm">Proxy</Badge>}
             {isCooldown && connection.isActive !== false && <CooldownTimer until={modelLockUntil} />}
@@ -190,6 +192,7 @@ ConnectionRow.propTypes = {
   isOAuth: PropTypes.bool.isRequired,
   isFirst: PropTypes.bool.isRequired,
   isLast: PropTypes.bool.isRequired,
+  isChecking: PropTypes.bool,
   onMoveUp: PropTypes.func.isRequired,
   onMoveDown: PropTypes.func.isRequired,
   onToggleActive: PropTypes.func.isRequired,
@@ -388,6 +391,31 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
 
   useEffect(() => { fetch_(); }, [fetch_]);
 
+  // Live status: connection tests, runtime errors, OAuth refreshes and CRUD
+  // arrive as SSE events; refetch the affected list without a page reload.
+  const [testingIds, setTestingIds] = useState(() => new Set());
+  const refetchTimer = useRef(null);
+  const refetchSoon = useCallback(() => {
+    clearTimeout(refetchTimer.current);
+    refetchTimer.current = setTimeout(fetch_, 150); // coalesce bursts
+  }, [fetch_]);
+  useConnectionEvents({
+    onEvent: useCallback((event) => {
+      if (!event) return;
+      const affectsThisProvider = event.provider === providerId || event.id === "*";
+      if (!affectsThisProvider) return;
+      if (event.type === "testing" && event.id) {
+        setTestingIds((prev) => new Set(prev).add(event.id));
+      }
+      if (event.type === "created" || event.type === "deleted" || event.id === "*") {
+        invalidateCache("/api/providers");
+      }
+      refetchSoon();
+    }, [providerId, refetchSoon]),
+    onRevision: refetchSoon,
+  });
+  useEffect(() => () => clearTimeout(refetchTimer.current), []);
+
   const saveStrategy = async (strategy, stickyLimit) => {
     try {
       // Read-modify-write: bypass the cache to avoid clobbering a concurrent update.
@@ -545,6 +573,7 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
                   isOAuth={isOAuth}
                   isFirst={idx === 0}
                   isLast={idx === connections.length - 1}
+                  isChecking={testingIds.has(conn.id)}
                   onMoveUp={() => handleSwapPriority(idx, idx - 1)}
                   onMoveDown={() => handleSwapPriority(idx, idx + 1)}
                   onToggleActive={(isActive) => handleToggleActive(conn.id, isActive)}

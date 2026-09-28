@@ -1,5 +1,6 @@
 import { getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "../../../../shared/constants/providers.js";
 import { discoverNoAuthProviderModels } from "../../../../lib/models/discoverNoAuth.js";
+import { AUTO_ADD_POLICIES } from "../../../../lib/models/autoAdd.js";
 import {
   createSyncJob,
   getSyncSettings,
@@ -82,18 +83,30 @@ export async function POST_handler(req, res, { params }) {
   }
 }
 
-// PUT /api/providers/[id]/sync-models - Update { autoFetch, autoSync }.
+// PUT /api/providers/[id]/sync-models - Update sync settings.
+// Body may contain any of: { autoFetch, autoSync, autoAdd, autoAddPolicy, includeUntested }.
+// Auto-Add is independently configurable from auto-fetch/auto-sync; unknown
+// fields are ignored by normalizeSyncSettings (never persisted).
 export async function PUT_handler(req, res, { params }) {
   try {
     const { id } = await params;
-    const { autoFetch, autoSync } = req.body || {};
+    const { autoFetch, autoSync, autoAdd, autoAddPolicy, includeUntested } = req.body || {};
     if (autoFetch !== undefined && typeof autoFetch !== "boolean") {
       return res.status(400).json({ error: "autoFetch must be a boolean" });
     }
     if (autoSync !== undefined && typeof autoSync !== "boolean") {
       return res.status(400).json({ error: "autoSync must be a boolean" });
     }
-    const settings = await updateSyncSettings(id, { autoFetch, autoSync });
+    if (autoAdd !== undefined && typeof autoAdd !== "boolean") {
+      return res.status(400).json({ error: "autoAdd must be a boolean" });
+    }
+    if (autoAddPolicy !== undefined && !AUTO_ADD_POLICIES.includes(autoAddPolicy)) {
+      return res.status(400).json({ error: `autoAddPolicy must be one of: ${AUTO_ADD_POLICIES.join(", ")}` });
+    }
+    if (includeUntested !== undefined && typeof includeUntested !== "boolean") {
+      return res.status(400).json({ error: "includeUntested must be a boolean" });
+    }
+    const settings = await updateSyncSettings(id, { autoFetch, autoSync, autoAdd, autoAddPolicy, includeUntested });
     return res.json({ providerId: id, settings });
   } catch (error) {
     return res.status(500).json({ error: "Failed to update sync settings" });

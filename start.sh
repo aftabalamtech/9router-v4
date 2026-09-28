@@ -1,23 +1,28 @@
 #!/usr/bin/env bash
 # 9Router V3 — one-command local startup.
 # Usage:
-#   ./start.sh              # backend + frontend on http://localhost:5177
-#   ./start.sh --public     # + public Cloudflare Quick Tunnel URL
+#   ./start.sh              # backend + frontend + public Cloudflare Quick Tunnel URL (default)
+#   ./start.sh --no-public  # local only (http://localhost:5177), no tunnel
 #   ./start.sh --no-install # skip automatic npm install
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Make a previously downloaded cloudflared reusable without re-download.
+export PATH="$ROOT/.local/bin:$PATH"
 BACKEND_PORT="${PORT:-3001}"
 FRONTEND_PORT=5177
 DO_INSTALL=1
-DO_PUBLIC=0
+DO_PUBLIC=1
 for arg in "$@"; do
   case "$arg" in
     --no-install) DO_INSTALL=0 ;;
-    --public) DO_PUBLIC=1 ;;
+    --public) DO_PUBLIC=1 ;; # kept for compatibility; public is now the default
+    --no-public|--local) DO_PUBLIC=0 ;;
     -h|--help)
-      echo "Usage: ./start.sh [--public] [--no-install]"
-      echo "  --public     expose the dashboard via a temporary Cloudflare Quick Tunnel URL"
+      echo "Usage: ./start.sh [--no-public] [--no-install]"
+      echo "  (default)      expose the dashboard via a temporary Cloudflare Quick Tunnel URL"
+      echo "  --no-public, --local  run local-only, no public tunnel"
+      echo "  --public       same as default (kept for compatibility)"
       echo "  --no-install skip automatic 'npm install' when binaries are missing"
       exit 0 ;;
     *) echo "Unknown arg: $arg (see --help)"; exit 1 ;;
@@ -114,6 +119,9 @@ echo " OK"
 # 7. Optional public URL via Cloudflare Quick Tunnel ---------------------------
 TUNNEL_PID=""
 if [ "$DO_PUBLIC" -eq 1 ]; then
+  if [ -x "$ROOT/.local/bin/cloudflared" ]; then
+    export PATH="$ROOT/.local/bin:$PATH"
+  fi
   if ! command -v cloudflared >/dev/null; then
     echo "cloudflared not found — downloading official binary..."
     CFDIR="$ROOT/.local/bin"; mkdir -p "$CFDIR"
