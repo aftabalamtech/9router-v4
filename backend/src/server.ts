@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { authMiddleware } from "./middleware/auth.js";
 import { buildAutoRouter } from "./autoRouter.js";
 import { getDbDiagnostics } from "./lib/db/diagnostics.js";
+import { initDb } from "./lib/db/index.js";
 
 const PORT = Number(process.env.PORT) || 3001;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5177";
@@ -37,21 +38,42 @@ app.use(express.urlencoded({ extended: true, limit: "128mb" }));
 // Includes NON-SENSITIVE database diagnostics: active engine, connection
 // status, schema/migration version and whether required tables exist. Never
 // exposes URLs, hosts, credentials or row data — safe for orchestrator probes.
-let dbDiagnosticsPromise: Promise<Record<string, unknown>> | null = null;
+//
+// REGRESSION GUARD: this endpoint must NEVER block on database init. The
+// previous version awaited DB diagnostics directly; with an unreachable
+// DATABASE_URL (pg has no default connect timeout) the probe hung forever,
+// Render failed the health checks and the service 503'd. Now diagnostics race
+// a short timeout: the HTTP server always answers quickly, and the database
+// block honestly reports "initializing"/"unavailable" instead of masking it.
+const DIAGNOSTICS_TIMEOUT_MS = 2_000;
+let dbDiagnosticsCache: { at: number; value: Record<string, unknown> } | null = null;
+
+async function getDiagnosticsForHealth(): Promise<Record<string, unknown>> {
+  if (dbDiagnosticsCache && Date.now() - dbDiagnosticsCache.at < 15_000) {
+    return dbDiagnosticsCache.value;
+  }
+  const value = (await Promise.race([
+    getDbDiagnostics(),
+    new Promise((resolve) =>
+      setTimeout(() => resolve({ status: "initializing" }), DIAGNOSTICS_TIMEOUT_MS)
+    ),
+  ])) as Record<string, unknown>;
+  // Cache only completed results — an "initializing" placeholder must not
+  // stick around once the real answer is available.
+  if (value.status !== "initializing") {
+    dbDiagnosticsCache = { at: Date.now(), value };
+  }
+  return value;
+}
+
 app.get("/api/health", async (_req, res) => {
   let database: Record<string, unknown> | undefined;
   try {
-    // Cache for 15s so frequent orchestrator probes don't hammer the DB.
-    if (!dbDiagnosticsPromise) {
-      dbDiagnosticsPromise = getDbDiagnostics().finally(() => {
-        setTimeout(() => { dbDiagnosticsPromise = null; }, 15_000);
-      });
-    }
-    database = (await dbDiagnosticsPromise) as Record<string, unknown>;
+    database = await getDiagnosticsForHealth();
   } catch {
-    database = undefined;
+    database = { status: "unavailable" };
   }
-  res.json({ status: "ok", version: "3.0.0", ts: Date.now(), ...(database ? { database } : {}) });
+  res.json({ status: "ok", version: "3.0.0", ts: Date.now(), database });
 });
 
 // ─── Auth Middleware ───────────────────────────────────────────────────────────
@@ -78,6 +100,13 @@ async function start() {
     console.log("API request:", req.method, req.url, req.originalUrl);
     apiRouter(req, res, next);
   });
+
+  // Initialize the database in the background: boot and health checks stay
+  // fast, while a broken DATABASE_URL surfaces in the logs immediately
+  // (with the pg connect timeout it errors within seconds, never hangs).
+  initDb()
+    .then(() => console.log("[DB] initialized"))
+    .catch((err: Error) => console.error("[DB] init failed:", err?.message || err));
 
   // LLM proxy remaps: /v1/* → /api/v1/*
   app.use("/v1", (req, res, next) => {

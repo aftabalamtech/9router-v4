@@ -181,6 +181,15 @@ Verified state of `backend/src/lib/db/`:
   connected, schemaVersion, pending-migration count and missing tables.
   Surfaced (non-sensitive only) on `GET /api/health` as a `database` block,
   cached for 15s. No URLs, hosts, credentials or row data.
+- **REGRESSION RULE (learned the hard way):** `/api/health` must NEVER await
+  DB init. pg's `Pool.connect()` has no default timeout, so awaiting it on an
+  unreachable DATABASE_URL hangs the probe → Render fails health checks →
+  Cloudflare serves 503. The endpoint now races diagnostics against a 2s
+  timeout (reporting "initializing"), and the pg adapter enforces a 10s
+  connect timeout (`PG_CONNECT_TIMEOUT_MS` overridable) so a dead DATABASE_URL
+  errors loudly within seconds. DB init itself runs in the background at boot
+  (`initDb()` after route mount) — boot speed and health probes never depend
+  on database reachability. Verified by `backend/test/prod-boot-check.manual.mjs`.
 - **Transactions:** PostgreSQL uses one client per transaction with
   AsyncLocalStorage + SAVEPOINT nesting; a failing ROLLBACK no longer masks
   the original error. SQLite wraps everything in a global promise queue

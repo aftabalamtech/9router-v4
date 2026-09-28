@@ -158,9 +158,21 @@ export async function createPostgresAdapter(connectionString) {
   }
   pool.on("error", (error) => console.error("[DB] PostgreSQL pool error:", error));
 
+  // pg's Pool has NO default connect timeout — an unreachable host would hang
+  // forever, stall health checks (Render 503) and make every DB request hang.
+  // Fail loudly within seconds instead.
+  const CONNECT_TIMEOUT_MS = Number(process.env.PG_CONNECT_TIMEOUT_MS) || 10_000;
   let bootstrapClient;
   try {
-    bootstrapClient = await pool.connect();
+    bootstrapClient = await Promise.race([
+      pool.connect(),
+      new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`connect timeout after ${CONNECT_TIMEOUT_MS}ms`)),
+          CONNECT_TIMEOUT_MS
+        )
+      ),
+    ]);
   } catch (error) {
     // Fail fast with an actionable message. Never fall back to SQLite here:
     // silently splitting data between two databases would corrupt state.
