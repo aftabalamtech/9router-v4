@@ -213,6 +213,21 @@ All three are addressed: fail-fast on bad DATABASE_URL, migrations on PG,
 legacy import disabled for PG, and `/api/health` diagnostics to identify the
 active engine in production.
 
+### Render 42601 startup crash (post-mortem)
+
+Migration `001-initial.js` called `buildCreateTableSql(name, def)` WITHOUT the
+dialect, emitting SQLite-only `INTEGER PRIMARY KEY AUTOINCREMENT` against
+PostgreSQL — error 42601 (syntax_error, `scanner_yyerror`), position 65 of the
+`usageHistory` DDL being exactly where `AUTOINCREMENT` starts. Rule: **every
+migration `up(db, dialect)` must forward the dialect into every SQL builder
+it uses.** Pinned by `backend/test/pg-ddl.test.js`, which scans ALL table DDL
+and all migration output under the postgres dialect for SQLite-only tokens
+(AUTOINCREMENT, INSERT OR REPLACE/IGNORE, PRAGMA).
+
+Also: `DATA_DIR` fallback warnings are now actionable — they state whether
+data is safe (DATABASE_URL set → PostgreSQL, unaffected) or at risk (SQLite
+on an ephemeral container filesystem).
+
 ## Related communities
 
 - Model Sync Jobs (`backend/src/lib/models/modelSync.js`)
