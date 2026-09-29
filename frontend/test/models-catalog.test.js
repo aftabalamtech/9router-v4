@@ -9,7 +9,11 @@
  *     all, so dynamically discovered models were missing from the global
  *     catalog even though the provider page displayed them.
  *
- * buildEntries mirrors the dedupe/filter rules in pages/models/page.jsx.
+ * NOTE: this file re-implements the rules against a FIXTURE catalogue so the
+ * scenarios stay readable and independent of the real provider tables. The
+ * implementation itself is shared/utils/modelCatalog.js and is tested directly
+ * against the real constants in test/modelCatalog.test.js — keep the two in
+ * step when changing dedupe or filter behaviour.
  */
 import test from "node:test";
 import assert from "node:assert/strict";

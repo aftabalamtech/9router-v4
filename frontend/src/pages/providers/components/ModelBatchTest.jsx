@@ -18,7 +18,7 @@ function formatElapsed(ms) {
 //   testResults: { [modelId]: "ok" | "error" } — for retry-failed
 //   onResult(modelId, status): called per model ("testing" | "ok" | "error")
 //   onBatchActiveChange(active): called when a batch starts/finishes
-export default function ModelBatchTest({ models, disabled, testResults, onResult, onBatchActiveChange, onBatchEnd, scopeLocked }) {
+export default function ModelBatchTest({ models, disabled, testResults, onResult, onBatchActiveChange, onBatchEnd, scopeLocked, extraActions = null }) {
   const [scope, setScope] = useState("all");
   const [timeoutMs, setTimeoutMs] = useState(15000);
   const [concurrency, setConcurrency] = useState(4);
@@ -254,6 +254,7 @@ export default function ModelBatchTest({ models, disabled, testResults, onResult
             Retry failed ({failedCount})
           </Button>
         )}
+        {extraActions}
         {active && (
           <Button onClick={handleCancel} variant="ghost">
             <span className="material-symbols-outlined text-sm mr-1">cancel</span>
@@ -311,4 +312,7 @@ ModelBatchTest.propTypes = {
   onBatchActiveChange: PropTypes.func,
   onBatchEnd: PropTypes.func,
   scopeLocked: PropTypes.bool,
+  // Extra controls rendered after "Retry failed" — used by the shared Available
+  // Models section to place the single Add Model button in one canonical spot.
+  extraActions: PropTypes.node,
 };

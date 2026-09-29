@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Suspense, lazy } from "react";
 import { DashboardLayout } from "@/shared/components/layouts";
+import ErrorBoundary from "@/shared/components/ErrorBoundary";
 
 // Lazy-loaded pages (code splitting — loads each page only when needed)
 const Landing         = lazy(() => import("./pages/landing/page"));
@@ -58,10 +59,28 @@ function LoadingFallback() {
   );
 }
 
+// One page, one boundary.
+//
+// React unmounts the whole tree when a render throws and nothing catches it, so
+// a single bad page used to blank the entire dashboard — sidebar, header and
+// navigation included, with no way to recover short of a refresh. Wrapping each
+// page keeps the failure contained: the shell stays interactive, the error is
+// reported to the server log, and the user gets a Retry.
+//
+// A lazy() import that fails to load is also caught here rather than leaving
+// the Suspense fallback spinning forever.
+function page(element: React.ReactNode, name: string) {
+  return <ErrorBoundary name={name}>{element}</ErrorBoundary>;
+}
+
 export default function App() {
   return (
-    <BrowserRouter>
-      <Suspense fallback={<LoadingFallback />}>
+    // Last-resort boundary. The per-page boundaries handle almost everything;
+    // this one exists so a failure in the shell itself (layout, router) still
+    // produces a readable, retryable screen instead of a blank document.
+    <ErrorBoundary level="app">
+      <BrowserRouter>
+        <Suspense fallback={<LoadingFallback />}>
         <Routes>
           {/* Public */}
           <Route path="/"       element={<Navigate to="/login" replace />} />
@@ -70,40 +89,41 @@ export default function App() {
 
           {/* Protected dashboard */}
           <Route path="/dashboard" element={<RequireAuth><DashboardLayout /></RequireAuth>}>
-            <Route index element={<Dashboard />} />
-            <Route path="providers"       element={<Providers />} />
-            <Route path="playground"      element={<Playground />} />
-            <Route path="models"          element={<Models />} />
-            <Route path="providers/new"   element={<ProvidersNew />} />
-            <Route path="providers/weavy/pool" element={<WeavyPool />} />
-            <Route path="providers/:id"   element={<ProviderDetail />} />
-            <Route path="usage"           element={<Usage />} />
-            <Route path="quota"           element={<Quota />} />
+            <Route index element={page(<Dashboard />, "dashboard")} />
+            <Route path="providers"       element={page(<Providers />, "providers")} />
+            <Route path="playground"      element={page(<Playground />, "playground")} />
+            <Route path="models"          element={page(<Models />, "models")} />
+            <Route path="providers/new"   element={page(<ProvidersNew />, "new provider")} />
+            <Route path="providers/weavy/pool" element={page(<WeavyPool />, "token pool")} />
+            <Route path="providers/:id"   element={page(<ProviderDetail />, "provider")} />
+            <Route path="usage"           element={page(<Usage />, "usage")} />
+            <Route path="quota"           element={page(<Quota />, "quota")} />
             {/* Pricing settings page omitted in v2 currently */}
-            <Route path="proxy-pools"     element={<ProxyPools />} />
-            <Route path="combos"          element={<Combos />} />
-            <Route path="endpoint"        element={<Endpoint />} />
-            <Route path="translator"      element={<Translator />} />
-            <Route path="cli-tools"       element={<CliTools />} />
-            <Route path="cli-tools/:toolId" element={<CliToolDetail />} />
-            <Route path="automation"      element={<Automation />} />
-            <Route path="automation/ammail-tutorial" element={<AmmailTutorial />} />
-            <Route path="basic-chat"      element={<BasicChat />} />
-            <Route path="mitm"            element={<Mitm />} />
-            <Route path="profile"         element={<Profile />} />
-            <Route path="docs"            element={<Docs />} />
-            <Route path="skills"          element={<Skills />} />
-            <Route path="console-log"     element={<ConsoleLog />} />
-            <Route path="media-providers/web" element={<MediaProviders />} />
-            <Route path="media-providers/:kind" element={<MediaProviderKind />} />
-            <Route path="media-providers/:kind/:id" element={<MediaProviderKindId />} />
-            <Route path="media-providers/combo/:id" element={<MediaProviderComboDetail />} />
+            <Route path="proxy-pools"     element={page(<ProxyPools />, "proxy pools")} />
+            <Route path="combos"          element={page(<Combos />, "combos")} />
+            <Route path="endpoint"        element={page(<Endpoint />, "endpoint")} />
+            <Route path="translator"      element={page(<Translator />, "translator")} />
+            <Route path="cli-tools"       element={page(<CliTools />, "CLI tools")} />
+            <Route path="cli-tools/:toolId" element={page(<CliToolDetail />, "CLI tool")} />
+            <Route path="automation"      element={page(<Automation />, "automation")} />
+            <Route path="automation/ammail-tutorial" element={page(<AmmailTutorial />, "tutorial")} />
+            <Route path="basic-chat"      element={page(<BasicChat />, "basic chat")} />
+            <Route path="mitm"            element={page(<Mitm />, "MITM")} />
+            <Route path="profile"         element={page(<Profile />, "profile")} />
+            <Route path="docs"            element={page(<Docs />, "docs")} />
+            <Route path="skills"          element={page(<Skills />, "skills")} />
+            <Route path="console-log"     element={page(<ConsoleLog />, "console log")} />
+            <Route path="media-providers/web" element={page(<MediaProviders />, "media providers")} />
+            <Route path="media-providers/:kind" element={page(<MediaProviderKind />, "media providers")} />
+            <Route path="media-providers/:kind/:id" element={page(<MediaProviderKindId />, "media provider")} />
+            <Route path="media-providers/combo/:id" element={page(<MediaProviderComboDetail />, "combo")} />
           </Route>
 
           {/* Fallback */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
-    </BrowserRouter>
+      </BrowserRouter>
+    </ErrorBoundary>
   );
 }

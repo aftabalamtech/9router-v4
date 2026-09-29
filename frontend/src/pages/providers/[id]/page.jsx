@@ -1,5 +1,5 @@
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useNavigate } from 'react-router-dom';
 import { Link } from 'react-router-dom';
 // next/image replaced with native img;
@@ -11,17 +11,14 @@ import { translate } from "@/i18n/runtime";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
 import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
 import useConnectionEvents from "@/shared/hooks/useConnectionEvents";
-import ModelRow from "./ModelRow";
-import PassthroughModelsSection from "./PassthroughModelsSection";
-import CompatibleModelsSection from "./CompatibleModelsSection";
 import ConnectionRow from "./ConnectionRow";
 import AddApiKeyModal from "./AddApiKeyModal";
 import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import LeonardoAdminPanel from "./LeonardoAdminPanel";
-import ModelBatchTest from "../components/ModelBatchTest";
 import ModelSyncPanel from "./ModelSyncPanel";
 import DisabledModelsSection from "./DisabledModelsSection";
+import AvailableModelsSection from "@/shared/components/AvailableModelsSection";
 import BulkAddConnectionsModal from "./BulkAddConnectionsModal";
 import { getProviderDisplayName, getCustomProviderVisuals } from "@/shared/utils/providerNaming";
 
@@ -50,12 +47,16 @@ export default function ProviderDetailPage() {
   const [modelAliases, setModelAliases] = useState({});
   const [headerImgError, setHeaderImgError] = useState(false);
   const [modelTestResults, setModelTestResults] = useState({});
+  // Last failure message per model, kept separately from the ok/error status so
+  // the Disabled section can show WHY a model is disabled. Records are cleared
+  // on a successful test, and preserved otherwise (test history is never lost).
+  const [modelTestErrors, setModelTestErrors] = useState({});
   const [modelsTestError, setModelsTestError] = useState("");
   const [testingModelIds, setTestingModelIds] = useState([]);
   const inflightTestRef = useRef(null);
   if (inflightTestRef.current === null) inflightTestRef.current = new Set();
-  const [batchTestingIds, setBatchTestingIds] = useState([]);
   const [showAddCustomModel, setShowAddCustomModel] = useState(false);
+  const [modelRegistrationNotice, setModelRegistrationNotice] = useState("");
   const [selectedConnectionIds, setSelectedConnectionIds] = useState([]);
   const [bulkProxyPoolId, setBulkProxyPoolId] = useState("__none__");
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
@@ -74,7 +75,6 @@ export default function ProviderDetailPage() {
   const [oneByOneResults, setOneByOneResults] = useState({});
   const [oneByOneSummary, setOneByOneSummary] = useState(null);
   const stopOneByOneRef = useRef(false);
-  const [importingQoderModels, setImportingQoderModels] = useState(false);
   const [providerTab, setProviderTab] = useState("overview"); // overview | admin
   const [showBulkAddModal, setShowBulkAddModal] = useState(false);
   const { copied, copy } = useCopyToClipboard();
@@ -171,19 +171,10 @@ export default function ProviderDetailPage() {
     }
   }, [providerStorageAlias]);
 
-  const handleDisableModel = async (modelId) => {
-    try {
-      const res = await fetch("/api/models/disabled", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providerAlias: providerStorageAlias, ids: [modelId] }),
-      });
-      if (res.ok) await fetchDisabledModels();
-    } catch (error) {
-      console.log("Error disabling model:", error);
-    }
-  };
-
+  // NOTE: the per-row "disable" handler moved to the shared Available Models
+  // section (its hide/show and block/unblock buttons write to the same two
+  // stores). Only the enable action is still needed here, for the single
+  // Disabled models section.
   const handleEnableModel = async (modelId) => {
     try {
       const res = await fetch(`/api/models/disabled?providerAlias=${encodeURIComponent(providerStorageAlias)}&id=${encodeURIComponent(modelId)}`, { method: "DELETE" });
@@ -193,26 +184,10 @@ export default function ProviderDetailPage() {
     }
   };
 
-  const handleDisableAll = async (ids) => {
-    if (!ids.length) return;
-    setConfirmState({
-      title: "Disable All Models",
-      message: `Disable all ${ids.length} model(s)?`,
-      onConfirm: async () => {
-        setConfirmState(null);
-        try {
-          const res = await fetch("/api/models/disabled", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ providerAlias: providerStorageAlias, ids }),
-          });
-          if (res.ok) await fetchDisabledModels();
-        } catch (error) {
-          console.log("Error disabling all models:", error);
-        }
-      }
-    });
-  };
+  // NOTE: the old "Disable All" bulk action was removed with the per-provider
+  // model list. The shared Available Models section owns bulk visibility now
+  // ("Hide all" / "All" in its header), and per-model disable/enable lives on
+  // each card — so there is exactly one place for each action.
 
   const handleEnableAll = async () => {
     try {
@@ -276,6 +251,21 @@ export default function ProviderDetailPage() {
       setSyncedModels([]);
     }
   }, []);
+
+  // model id -> service kind, so re-testing a disabled model from the Disabled
+  // section sends the right `kind` (an image model must not be probed as a
+  // chat model, which would fail for the wrong reason).
+  const modelKindsById = useMemo(() => {
+    const map = new Map();
+    for (const m of models) map.set(m.id, m.type || "llm");
+    for (const fm of kiloFreeModels) {
+      if (!map.has(fm.id)) map.set(fm.id, fm.type || "llm");
+    }
+    for (const m of syncedModels) {
+      if (m?.id && !map.has(m.id)) map.set(m.id, m.type || "llm");
+    }
+    return map;
+  }, [models, kiloFreeModels, syncedModels]);
 
   // Fetch free models from Kilo API for kilocode provider
   useEffect(() => {
@@ -479,78 +469,12 @@ export default function ProviderDetailPage() {
     }
   };
 
-  const handleDeleteAlias = async (alias) => {
-    try {
-      const res = await fetch(`/api/models/alias?alias=${encodeURIComponent(alias)}`, {
-        method: "DELETE",
-      });
-      if (res.ok) {
-        await fetchAliases();
-      }
-    } catch (error) {
-      console.log("Error deleting alias:", error);
-    }
-  };
-
-  // Fetch Qoder model list and automatically add to available models
-  const handleImportQoderModels = async () => {
-    if (importingQoderModels) return;
-    const activeConnection = connections.find((conn) => conn.isActive !== false);
-    if (!activeConnection) {
-      alert(translate("Please add an active Qoder connection first"));
-      return;
-    }
-
-    setImportingQoderModels(true);
-    try {
-      const res = await fetch(`/api/providers/${activeConnection.id}/models`);
-      const data = await res.json();
-      if (!res.ok) {
-        alert(data.error || translate("Failed to fetch models"));
-        return;
-      }
-      const models = data.models || [];
-      if (models.length === 0) {
-        alert(translate("No models returned"));
-        return;
-      }
-
-      let importedCount = 0;
-      for (const model of models) {
-        const modelId = model.id || model.name;
-        if (!modelId) continue;
-        
-        // Qoder model ID format may be "qoder/auto" or "auto", need to remove prefix
-        const cleanModelId = modelId.replace(/^qoder\//, "");
-        const fullModel = `${providerStorageAlias}/${cleanModelId}`;
-        
-        // Check if already exists
-        if (Object.values(modelAliases).includes(fullModel)) {
-          continue;
-        }
-        
-        // Use model ID as alias
-        const alias = cleanModelId;
-        if (modelAliases[alias]) {
-          continue;
-        }
-        
-        await handleSetAlias(cleanModelId, alias, providerStorageAlias);
-        importedCount += 1;
-      }
-      
-      if (importedCount === 0) {
-        alert(translate("All models already exist, no new models added"));
-      } else {
-        alert(translate("Successfully added") + ` ${importedCount} ` + translate("models"));
-      }
-    } catch (error) {
-      console.log("Error importing Qoder models:", error);
-      alert(translate("Error fetching models") + ": " + error.message);
-    } finally {
-      setImportingQoderModels(false);
-    }
-  };
+  // NOTE: the Qoder-only "Fetch Qoder Models" importer was removed. It was a
+  // third route to the same outcome as the sync panel's "Import from /models"
+  // and Add Model, it stripped a "qoder/" prefix that the shared importer keeps
+  // intact, and it registered models one-by-one instead of through the
+  // duplicate-safe bulk alias endpoint. "Import from /models" covers it and is
+  // available on every provider that exposes the endpoint.
 
   const handleRunOneByOneTest = async () => {
     if (oneByOneRunning || connections.length === 0) return;
@@ -966,9 +890,20 @@ export default function ProviderDetailPage() {
       });
       const data = await res.json();
       setModelTestResults((prev) => ({ ...prev, [modelId]: data.ok ? "ok" : "error" }));
+      // A passing test clears the stored failure detail; a failure records it so
+      // the Disabled section can explain why, without discarding history.
+      setModelTestErrors((prev) => {
+        if (data.ok) {
+          if (!(modelId in prev)) return prev;
+          const { [modelId]: _dropped, ...rest } = prev;
+          return rest;
+        }
+        return { ...prev, [modelId]: data.error || "Model not reachable" };
+      });
       setModelsTestError(data.ok ? "" : (data.error || "Model not reachable"));
     } catch {
       setModelTestResults((prev) => ({ ...prev, [modelId]: "error" }));
+      setModelTestErrors((prev) => ({ ...prev, [modelId]: "Network error" }));
       setModelsTestError("Network error");
     } finally {
       inflightTestRef.current.delete(modelId);
@@ -976,289 +911,12 @@ export default function ProviderDetailPage() {
     }
   };
 
-  const handleBatchResult = useCallback((fullModelId, status) => {
-    // Strip the known storage-alias prefix (model ids themselves may contain slashes).
-    const prefix = `${providerStorageAlias}/`;
-    const modelId = fullModelId.startsWith(prefix)
-      ? fullModelId.slice(prefix.length)
-      : fullModelId;
-    if (status === "testing") {
-      setBatchTestingIds((prev) => (prev.includes(modelId) ? prev : [...prev, modelId]));
-      return;
-    }
-    setBatchTestingIds((prev) => prev.filter((id) => id !== modelId));
-    setModelTestResults((prev) => ({ ...prev, [modelId]: status }));
-  }, []);
-
-  const renderModelsSection = () => {
-    if (isCompatible) {
-      return (
-        <CompatibleModelsSection
-          providerStorageAlias={providerStorageAlias}
-          providerDisplayAlias={providerDisplayAlias}
-          modelAliases={modelAliases}
-          copied={copied}
-          onCopy={copy}
-          onSetAlias={handleSetAlias}
-          onDeleteAlias={handleDeleteAlias}
-          connections={connections}
-          isAnthropic={isAnthropicCompatible}
-          syncedModels={syncedModels}
-          testResults={modelTestResults}
-          onTestModel={handleTestModel}
-          batchTestingIds={batchTestingIds}
-          isFreeNoAuth={isFreeNoAuth}
-        />
-      );
-    }
-    // Added models only: built-ins + Kilo free + aliases. Sync-discovered
-    // models that have NOT been added live exclusively in the Discovered
-    // section of the sync panel (stable identity: storageAlias + upstream id).
-    // Previously they were merged here too, so added models rendered twice.
-    // Filter models to only those matching this provider's service kinds
-    const providerServiceKinds = AI_PROVIDERS[providerId]?.serviceKinds || ["llm"];
-    const isLlmProvider = providerServiceKinds.includes("llm");
-    const allModels = [
-      ...models,
-      ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
-    ].filter((m) => {
-      // Models without type are LLM
-      const modelType = m.type || "llm";
-      // If provider supports LLM, show LLM models (no type or type=llm)
-      if (isLlmProvider && (!m.type || m.type === "llm")) return true;
-      // Show model if its type matches any of the provider's service kinds
-      return providerServiceKinds.includes(modelType);
-    });
-    const disabledSet = new Set(disabledModelIds);
-    const displayModels = allModels.filter((m) => !disabledSet.has(m.id));
-    const disabledDisplayModels = allModels.filter((m) => disabledSet.has(m.id));
-    // Custom models added by user (stored as aliases: modelId → providerAlias/modelId)
-    const customModels = Object.entries(modelAliases)
-      .filter(([alias, fullModel]) => {
-        const prefix = `${providerStorageAlias}/`;
-        if (!fullModel.startsWith(prefix)) return false;
-        const modelId = fullModel.slice(prefix.length);
-        // Skip anything already shown as a built-in/discovered chip, otherwise
-        // a synced model that also has an alias entry would render twice.
-        if (allModels.some((m) => m.id === modelId)) return false;
-        // For passthroughModels, include all aliases (model IDs may contain slashes like "anthropic/claude-3")
-        if (providerInfo.passthroughModels) return true;
-        return alias === modelId;
-      })
-      .map(([alias, fullModel]) => ({
-        id: fullModel.slice(`${providerStorageAlias}/`.length),
-        alias,
-        fullModel,
-      }));
-
-    // Group models by type for providers with image/video
-    const hasMultipleKinds = providerServiceKinds.length > 1 && !providerServiceKinds.every(k => k === 'llm');
-    const imageModels = displayModels.filter(m => m.type === 'image');
-    const videoModels = displayModels.filter(m => m.type === 'video');
-    const llmModels   = displayModels.filter(m => !m.type || m.type === 'llm');
-
-    // Everything rendered as an enabled model chip below (built-in + custom),
-    // excluding disabled ones — this is what "Test all" must actually cover.
-    const testableModels = [
-      ...displayModels.map((m) => ({
-        id: m.id,
-        fullModel: `${providerStorageAlias}/${m.id}`,
-        kind: m.type || "llm",
-        isFree: !!m.isFree,
-      })),
-      ...customModels.map((m) => ({
-        id: m.id,
-        fullModel: `${providerStorageAlias}/${m.id}`,
-        kind: "llm",
-        isFree: false,
-      })),
-    ];
-
-    const renderModelChips = (modelList) => modelList.map((model) => {
-      const fullModel = `${providerStorageAlias}/${model.id}`;
-      const oldFormatModel = `${providerId}/${model.id}`;
-      const existingAlias = Object.entries(modelAliases).find(
-        ([, m]) => m === fullModel || m === oldFormatModel
-      )?.[0];
-      return (
-        <ModelRow
-          key={model.id}
-          model={model}
-          fullModel={`${providerDisplayAlias}/${model.id}`}
-          alias={existingAlias}
-          copied={copied}
-          onCopy={copy}
-          onSetAlias={(alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
-          onDeleteAlias={() => handleDeleteAlias(existingAlias)}
-          testStatus={modelTestResults[model.id]}
-          onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id, model.type || "llm") : undefined}
-          isTesting={testingModelIds.includes(model.id) || batchTestingIds.includes(model.id)}
-          isFree={model.isFree}
-          onDisable={() => handleDisableModel(model.id)}
-        />
-      );
-    });
-
-    const SectionHeader = ({ icon, label, count }) => (
-      <div className="w-full flex items-center gap-2 mt-1 mb-1">
-        <span className="material-symbols-outlined text-base text-text-muted">{icon}</span>
-        <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">{label}</span>
-        <span className="text-[10px] text-text-muted/60 bg-sidebar px-1.5 py-0.5 rounded-full">{count}</span>
-        <div className="flex-1 h-px bg-border/40" />
-      </div>
-    );
-
-    const addModelButton = (
-      <button
-        onClick={() => setShowAddCustomModel(true)}
-        className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-primary/40 px-3 py-2 text-xs text-primary transition-colors hover:border-primary hover:bg-primary/5 sm:w-auto"
-      >
-        <span className="material-symbols-outlined text-sm">add</span>
-        Add Model
-      </button>
-    );
-
-    return (
-      <div className="flex flex-col gap-2">
-        {/* Custom models first */}
-        {testableModels.length > 0 && (
-          <>
-            {hasMultipleKinds && customModels.length > 0 && <SectionHeader icon="star" label="Custom" count={customModels.length} />}
-            {/* Batch-test every model rendered below, not just the custom ones.
-                Previously this only received `customModels`, so a provider with
-                built-in or discovered models reported a count far below the
-                models actually shown and testable. */}
-            <ModelBatchTest
-              models={testableModels}
-              disabled={connections.length === 0 && !isFreeNoAuth}
-              testResults={modelTestResults}
-              onResult={handleBatchResult}
-              scopeLocked
-            />
-            <div className="flex flex-wrap gap-3">
-              {customModels.map((model) => (
-                <ModelRow
-                  key={model.id}
-                  model={{ id: model.id }}
-                  fullModel={`${providerDisplayAlias}/${model.id}`}
-                  alias={model.alias}
-                  copied={copied}
-                  onCopy={copy}
-                  onSetAlias={() => {}}
-                  onDeleteAlias={() => handleDeleteAlias(model.alias)}
-                  testStatus={modelTestResults[model.id]}
-                  onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
-                  isTesting={testingModelIds.includes(model.id) || batchTestingIds.includes(model.id)}
-                  isCustom
-                  isFree={false}
-                />
-              ))}
-            </div>
-          </>
-        )}
-
-        {/* Image models */}
-        {hasMultipleKinds && imageModels.length > 0 && (
-          <>
-            <SectionHeader icon="brush" label="Image Generation" count={imageModels.length} />
-            <div className="flex flex-wrap gap-3">
-              {renderModelChips(imageModels)}
-            </div>
-          </>
-        )}
-
-        {/* Video models */}
-        {hasMultipleKinds && videoModels.length > 0 && (
-          <>
-            <SectionHeader icon="movie" label="Video Generation" count={videoModels.length} />
-            <div className="flex flex-wrap gap-3">
-              {renderModelChips(videoModels)}
-            </div>
-          </>
-        )}
-
-        {/* LLM models (or all models if no grouping needed) */}
-        {(!hasMultipleKinds ? displayModels : llmModels).length > 0 && (
-          <div className="flex flex-wrap gap-3">
-            {!hasMultipleKinds
-              ? renderModelChips(displayModels)
-              : renderModelChips(llmModels)
-            }
-          </div>
-        )}
-
-        {/* Add model button */}
-        <div className="flex flex-wrap gap-3 mt-1">
-          {addModelButton}
-
-          {/* Import Qoder models */}
-          {providerId === "qoder" && connections.some((conn) => conn.isActive !== false) && (
-            <button
-              onClick={handleImportQoderModels}
-              disabled={importingQoderModels}
-              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-blue-500/40 px-3 py-2 text-xs text-blue-600 dark:text-blue-400 transition-colors hover:border-blue-500 hover:bg-blue-500/5 sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <span className="material-symbols-outlined text-sm" style={importingQoderModels ? { animation: "spin 1s linear infinite" } : undefined}>
-                {importingQoderModels ? "progress_activity" : "download"}
-              </span>
-              {importingQoderModels ? translate("Fetching...") : translate("Fetch Qoder Models")}
-            </button>
-          )}
-        </div>
-
-        {/* Suggested models */}
-        {suggestedModels.length > 0 && (() => {
-          const addedFullModels = new Set(Object.values(modelAliases));
-          const hardcodedIds = new Set(models.map((m) => m.id));
-          const notAdded = suggestedModels.filter(
-            (m) => !addedFullModels.has(`${providerStorageAlias}/${m.id}`) && !hardcodedIds.has(m.id)
-          );
-          if (notAdded.length === 0) return null;
-          return (
-            <div className="w-full mt-2">
-              <p className="text-xs text-text-muted mb-2">Suggested free models (≥200k context):</p>
-              <div className="flex flex-wrap gap-2">
-                {notAdded.map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={async () => {
-                      const alias = m.id.split("/").pop();
-                      await handleSetAlias(m.id, alias, providerStorageAlias);
-                    }}
-                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-xs text-text-muted hover:text-primary hover:border-primary/40 hover:bg-primary/5 transition-colors"
-                    title={`${m.name} · ${(m.contextLength / 1000).toFixed(0)}k ctx`}
-                  >
-                    <span className="material-symbols-outlined text-[13px]">add</span>
-                    {m.id.split("/").pop()}
-                  </button>
-                ))}
-              </div>
-            </div>
-          );
-        })()}
-
-        {/* Disabled models */}
-        {disabledDisplayModels.length > 0 && (
-          <div className="w-full mt-2">
-            <p className="text-xs text-text-muted mb-2">Disabled models ({disabledDisplayModels.length}):</p>
-            <div className="flex flex-wrap gap-2">
-              {disabledDisplayModels.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => handleEnableModel(m.id)}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-dashed border-black/10 dark:border-white/10 text-xs text-text-muted hover:text-primary hover:border-primary/40 hover:bg-primary/5 transition-colors"
-                  title="Restore model"
-                >
-                  <span className="material-symbols-outlined text-[13px]">add</span>
-                  {m.id}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
+  // NOTE: the provider page's own batch-result handler was removed. Batch
+  // testing now lives in the shared AvailableModelsSection, which owns the
+  // testing state and the per-model results. The dead copy left a call to a
+  // `setBatchTestingIds` setter whose state no longer existed — a latent
+  // ReferenceError that would have blanked the page the moment anything
+  // invoked it.
 
   if (loading) {
     return (
@@ -1797,45 +1455,15 @@ export default function ProviderDetailPage() {
       )}
 
 
-      {/* Models — Added models (what the gateway routes) and, inside the sync
-          panel, the Discovered models (what upstream offers but is not added
-          yet). They are deliberately separate lists. */}
+      {/* ── Models ─────────────────────────────────────────────────────
+          One layout for every provider type (built-in, OAuth, custom,
+          OpenAI-compatible):
+            1. the collapsible model synchronization panel
+            2. the shared Available Models section (same filters, cards and
+               actions as the global Models page, scoped to this provider)
+            3. the single Disabled Models section
+          Provider configuration and connections above are untouched. */}
       <Card>
-        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="text-lg font-semibold">
-            {isCompatible ? "Added Models" : "Available Models"}
-          </h2>
-          {!isCompatible && (() => {
-            const _providerServiceKinds = AI_PROVIDERS[providerId]?.serviceKinds || ["llm"];
-            const _isLlmProvider = _providerServiceKinds.includes("llm");
-            const allIds = [
-              ...models,
-              ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
-            ].filter((m) => {
-              const modelType = m.type || "llm";
-              if (_isLlmProvider && (!m.type || m.type === "llm")) return true;
-              return _providerServiceKinds.includes(modelType);
-            }).map((m) => m.id);
-            const activeIds = allIds.filter((id) => !disabledModelIds.includes(id));
-            return (
-              <div className="flex gap-2">
-                {disabledModelIds.length > 0 && (
-                  <Button size="sm" variant="secondary" icon="restart_alt" onClick={handleEnableAll}>
-                    Active All
-                  </Button>
-                )}
-                {activeIds.length > 0 && (
-                  <Button size="sm" variant="secondary" icon="block" onClick={() => handleDisableAll(activeIds)}>
-                    Disable All
-                  </Button>
-                )}
-              </div>
-            );
-          })()}
-        </div>
-        {!!modelsTestError && (
-          <p className="text-xs text-red-500 mb-3 break-words">{modelsTestError}</p>
-        )}
         <ModelSyncPanel
           providerId={providerId}
           providerStorageAlias={providerStorageAlias}
@@ -1852,20 +1480,80 @@ export default function ProviderDetailPage() {
           }
           onCatalogChanged={() => { fetchAliases(); fetchSyncedModels(providerStorageAlias); fetchDisabledModels(); }}
         />
-        {renderModelsSection()}
 
-        {/* Dedicated Disabled models section (custom providers included).
-            State lives in the shared disabledModels store keyed by the
-            provider's storage alias, so this list and the Added list never
-            show the same model twice. */}
+        {/* Suggested models — provider-specific catalogue of free models with
+            a large context window. Kept above the model list; it only offers
+            models that are not registered yet, so it never duplicates a card. */}
+        {suggestedModels.length > 0 && (() => {
+          const addedFullModels = new Set(Object.values(modelAliases));
+          const hardcodedIds = new Set(models.map((m) => m.id));
+          const notAdded = suggestedModels.filter(
+            (m) => !addedFullModels.has(`${providerStorageAlias}/${m.id}`) && !hardcodedIds.has(m.id)
+          );
+          if (notAdded.length === 0) return null;
+          return (
+            <div className="w-full mb-3">
+              <p className="text-xs text-text-muted mb-2">Suggested free models (≥200k context):</p>
+              <div className="flex flex-wrap gap-2">
+                {notAdded.map((m) => (
+                  <button
+                    key={m.id}
+                    onClick={async () => {
+                      const alias = m.id.split("/").pop();
+                      await handleSetAlias(m.id, alias, providerStorageAlias);
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-xs text-text-muted hover:text-primary hover:border-primary/40 hover:bg-primary/5 transition-colors"
+                    title={`${m.name} · ${(m.contextLength / 1000).toFixed(0)}k ctx`}
+                  >
+                    <span className="material-symbols-outlined text-[13px]">add</span>
+                    {m.id.split("/").pop()}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+
+        <div className="border-t border-border/60 pt-4">
+          {modelRegistrationNotice && (
+            <div className="mb-3 rounded-lg border border-border bg-sidebar/40 px-3 py-2 text-xs text-text-muted flex items-center gap-2">
+              <span className="material-symbols-outlined text-sm">check_circle</span>
+              <span className="flex-1">{modelRegistrationNotice}</span>
+              <button
+                onClick={() => setModelRegistrationNotice("")}
+                className="text-text-muted hover:text-text-main"
+                aria-label="Dismiss"
+              >
+                <span className="material-symbols-outlined text-sm">close</span>
+              </button>
+            </div>
+          )}
+          <AvailableModelsSection
+            storageAlias={providerStorageAlias}
+            headerTitle="Available Models"
+            onAddModelClick={() => setShowAddCustomModel(true)}
+            addModelLabel="Add Model"
+          />
+        </div>
+
+        {!!modelsTestError && (
+          <p className="text-xs text-red-500 mt-3 break-words">{modelsTestError}</p>
+        )}
+
+        {/* The ONE Disabled models section. State lives in the shared
+            disabledModels store keyed by the provider's storage alias, so this
+            list and the Available Models list never show the same model twice:
+            hidden models are filtered out of the default Available view. */}
         <DisabledModelsSection
           disabledIds={disabledModelIds}
           providerName={customProviderName}
           catalog={syncedModels}
           testResults={modelTestResults}
+          testErrors={modelTestErrors}
           modelAliases={modelAliases}
           onEnable={handleEnableModel}
           onEnableAll={handleEnableAll}
+          onRetest={(modelId) => handleTestModel(modelId, modelKindsById.get(modelId) || "llm")}
         />
       </Card>
 
@@ -1952,24 +1640,66 @@ export default function ProviderDetailPage() {
           isAnthropic={isAnthropicCompatible}
         />
       )}
-      {!isCompatible && (
-              <AddCustomModelModal
-          isOpen={showAddCustomModel}
-          providerAlias={providerStorageAlias}
-          providerDisplayAlias={providerDisplayAlias}
-          allowedKinds={AI_PROVIDERS[providerId]?.serviceKinds || ["llm"]}
-          onSave={async (modelId, modelKind) => {
-            // Store as alias with kind-aware metadata
-            // For passthrough providers (OpenRouter), use last segment as alias
-            const alias = providerInfo?.passthroughModels
-              ? modelId.split("/").pop()
-              : modelId;
-            await handleSetAlias(modelId, alias, providerStorageAlias);
-            setShowAddCustomModel(false);
-          }}
-          onClose={() => setShowAddCustomModel(false)}
-        />
-      )}
+      {/* The ONE Add Model dialog. It is opened by the Add Model button in the
+          shared Available Models section, next to Retry failed — there is no
+          second inline input anywhere on the provider page. Compatible
+          (OpenAI/Anthropic) providers use it too, so every provider type adds
+          models the same way.
+
+          Registration goes through POST /api/models/register, which records the
+          capability set and is idempotent: re-adding an existing model merges
+          capabilities and keeps its configuration and test history instead of
+          creating a second record. */}
+      <AddCustomModelModal
+        isOpen={showAddCustomModel}
+        providerAlias={providerStorageAlias}
+        providerDisplayAlias={providerDisplayAlias}
+        allowedKinds={
+          isCompatible
+            ? ["llm"]
+            : AI_PROVIDERS[providerId]?.serviceKinds || ["llm"]
+        }
+        onSave={async (payload) => {
+          const res = await fetch("/api/models/register", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              prefix: payload.prefix,
+              modelId: payload.modelId,
+              capabilities: payload.capabilities,
+              displayName: payload.displayName,
+              endpoint: payload.endpoint,
+              settings: payload.settings,
+              // Passthrough providers (OpenRouter, Vercel gateway) expose ids
+              // containing slashes; the alias is the last segment so it stays
+              // addressable.
+              alias: providerInfo?.passthroughModels
+                ? payload.modelId.split("/").pop()
+                : undefined,
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            throw new Error(data.error || "Could not register the model");
+          }
+          // Refresh every model view: the alias and custom-model stores both
+          // changed, and a duplicate add must not leave a stale list behind.
+          await Promise.all([
+            fetchAliases(),
+            fetchSyncedModels(providerStorageAlias),
+            fetchDisabledModels(),
+          ]);
+          invalidateCache("/api/models/alias");
+          invalidateCache("/api/models/custom");
+          setModelRegistrationNotice(
+            data.duplicate
+              ? `${data.registeredId} is already registered — its capabilities were merged, nothing was duplicated.`
+              : `Added ${data.registeredId}`
+          );
+          setShowAddCustomModel(false);
+        }}
+        onClose={() => setShowAddCustomModel(false)}
+      />
 
       {/* AG Risk Confirmation Modal */}
       <ConfirmModal

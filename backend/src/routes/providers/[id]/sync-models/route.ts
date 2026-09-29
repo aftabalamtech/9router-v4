@@ -1,6 +1,11 @@
 import { getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "../../../../shared/constants/providers.js";
 import { discoverNoAuthProviderModels } from "../../../../lib/models/discoverNoAuth.js";
-import { AUTO_ADD_POLICIES } from "../../../../lib/models/autoAdd.js";
+import {
+  AUTO_ADD_POLICIES,
+  AUTO_ADD_KINDS,
+  normalizeAutoAddKinds,
+} from "../../../../lib/models/autoAdd.js";
+import { getModelCapabilities } from "../../../../shared/constants/providerCapabilities.js";
 import {
   createSyncJob,
   getSyncSettings,
@@ -32,6 +37,14 @@ export async function GET_handler(req, res, { params }) {
       settings,
       syncedCount: values.length,
       staleCount: values.filter((v) => v?.stale).length,
+      // Single source of truth for which controls the UI may offer, so the
+      // dashboard and the routes can never disagree about a provider's
+      // discovery/import support.
+      capabilities: getModelCapabilities(id, {
+        isOpenAICompatible: isOpenAICompatibleProvider(id),
+        isAnthropicCompatible: isAnthropicCompatibleProvider(id),
+      }),
+      autoAddKinds: AUTO_ADD_KINDS,
     };
     if (searchParams.get("include") === "catalog") {
       payload.catalog = values
@@ -90,7 +103,7 @@ export async function POST_handler(req, res, { params }) {
 export async function PUT_handler(req, res, { params }) {
   try {
     const { id } = await params;
-    const { autoFetch, autoSync, autoAdd, autoAddPolicy, includeUntested } = req.body || {};
+    const { autoFetch, autoSync, autoAdd, autoAddPolicy, includeUntested, autoAddKinds } = req.body || {};
     if (autoFetch !== undefined && typeof autoFetch !== "boolean") {
       return res.status(400).json({ error: "autoFetch must be a boolean" });
     }
@@ -106,7 +119,29 @@ export async function PUT_handler(req, res, { params }) {
     if (includeUntested !== undefined && typeof includeUntested !== "boolean") {
       return res.status(400).json({ error: "includeUntested must be a boolean" });
     }
-    const settings = await updateSyncSettings(id, { autoFetch, autoSync, autoAdd, autoAddPolicy, includeUntested });
+    if (autoAddKinds !== undefined && !Array.isArray(autoAddKinds)) {
+      return res.status(400).json({ error: "autoAddKinds must be an array" });
+    }
+    // Unknown kinds are rejected rather than silently dropped, so a typo
+    // cannot quietly leave a filter that excludes every model.
+    if (Array.isArray(autoAddKinds)) {
+      const unknown = autoAddKinds.filter(
+        (k) => !AUTO_ADD_KINDS.includes(k)
+      );
+      if (unknown.length > 0) {
+        return res.status(400).json({
+          error: `unknown autoAddKinds: ${unknown.join(", ")}. Allowed: ${AUTO_ADD_KINDS.join(", ")}`,
+        });
+      }
+    }
+    const settings = await updateSyncSettings(id, {
+      autoFetch,
+      autoSync,
+      autoAdd,
+      autoAddPolicy,
+      includeUntested,
+      autoAddKinds: autoAddKinds === undefined ? undefined : normalizeAutoAddKinds(autoAddKinds),
+    });
     return res.json({ providerId: id, settings });
   } catch (error) {
     return res.status(500).json({ error: "Failed to update sync settings" });

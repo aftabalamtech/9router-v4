@@ -55,6 +55,8 @@ export const DEFAULT_SYNC_SETTINGS = Object.freeze({
   autoAdd: false,
   autoAddPolicy: "working-only",
   includeUntested: false,
+  // Capability filter. Empty = no filter (every discovered kind is eligible).
+  autoAddKinds: [],
 });
 
 // Discovered-section filters (mirror of the Models tab vocabulary).
@@ -91,12 +93,49 @@ export function normalizeSyncSettings(raw) {
     ),
     includeUntested:
       typeof base.includeUntested === "boolean" ? base.includeUntested : false,
+    // Dropped entirely (not defaulted to []) on read: an unknown stored value
+    // must not silently become a filter that excludes everything. Re-deriving
+    // from the raw value each read keeps this idempotent.
+    autoAddKinds: normalizeAutoAddKinds(base.autoAddKinds),
   };
 }
 
 export function stableModelId(id) {
   if (typeof id !== "string") return "";
   return id.trim().slice(0, 200);
+}
+
+// Capability kinds offered as Auto-Add filters. Kept small and aligned with the
+// kinds discovery can actually classify, so a filter never silently matches
+// nothing.
+export const AUTO_ADD_KINDS = Object.freeze([
+  "llm",
+  "image",
+  "video",
+  "audio",
+  "embedding",
+]);
+
+// Discovered entries carry `type` from upstream (or a name-derived guess).
+// Normalize to the five filter buckets; unknown values are treated as "llm",
+// which is what discovery already assumes.
+export function normalizeModelKind(type) {
+  if (type === "image" || type === "video" || type === "embedding") return type;
+  if (type === "tts" || type === "stt" || type === "audio") return "audio";
+  return "llm";
+}
+
+// An empty/absent list means "no filter" — every discovered kind is eligible.
+// A non-empty list restricts auto-add to those kinds.
+export function normalizeAutoAddKinds(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const kind of value) {
+    if (typeof kind !== "string") continue;
+    const k = kind.toLowerCase();
+    if (AUTO_ADD_KINDS.includes(k) && !out.includes(k)) out.push(k);
+  }
+  return out;
 }
 
 // Dedupe upstream entries by stable id (first-seen wins, connectionIds merged).
@@ -328,14 +367,22 @@ export function resolveAutoAdd({
   disabledIds,
   policy = "working-only",
   includeUntested = false,
+  autoAddKinds = [],
 } = {}) {
   const disabled = disabledIds instanceof Set ? disabledIds : new Set(disabledIds || []);
   const toAdd = [];
   const toDisable = [];
   const effective = normalizeAutoAddPolicy(policy, "working-only");
+  const kinds = normalizeAutoAddKinds(autoAddKinds);
+  // Capability filter runs BEFORE status resolution so a filtered-out kind is
+  // never added and never pushed to the disabled list — filtering out "image"
+  // must not disable every image model either.
+  const kindAllowed = (row) =>
+    kinds.length === 0 || kinds.includes(normalizeModelKind(row?.type));
   for (const row of discoveredRows || []) {
     const id = stableModelId(row?.id);
     if (!id || row?.isAdded || disabled.has(id)) continue;
+    if (!kindAllowed(row)) continue;
     const status = testStatusOf(row.fullModel || id, testResults);
     if (effective === "all") {
       // Everything eligible, subject to the existing safety rules above.

@@ -46,6 +46,32 @@ export function stableModelId(id) {
   return id.trim().slice(0, 200);
 }
 
+// Mirror of backend/src/lib/models/autoAdd.js capability helpers.
+export const AUTO_ADD_KINDS = Object.freeze([
+  "llm",
+  "image",
+  "video",
+  "audio",
+  "embedding",
+]);
+
+export function normalizeModelKind(type) {
+  if (type === "image" || type === "video" || type === "embedding") return type;
+  if (type === "tts" || type === "stt" || type === "audio") return "audio";
+  return "llm";
+}
+
+export function normalizeAutoAddKinds(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const kind of value) {
+    if (typeof kind !== "string") continue;
+    const k = kind.toLowerCase();
+    if (AUTO_ADD_KINDS.includes(k) && !out.includes(k)) out.push(k);
+  }
+  return out;
+}
+
 export function dedupeDiscovered(entries) {
   const byId = new Map();
   for (const entry of entries || []) {
@@ -181,14 +207,20 @@ export function resolveAutoAdd({
   disabledIds,
   policy = "working-only",
   includeUntested = false,
+  autoAddKinds = [],
 } = {}) {
   const disabled = new Set(disabledIds || []);
   const toAdd = [];
   const toDisable = [];
   const effective = normalizeAutoAddPolicy(policy, "working-only");
+  const kinds = normalizeAutoAddKinds(autoAddKinds);
+  // A filtered-out kind is skipped entirely — never added, never disabled.
+  const kindAllowed = (row) =>
+    kinds.length === 0 || kinds.includes(normalizeModelKind(row?.type));
   for (const row of discoveredRows || []) {
     const id = stableModelId(row?.id);
     if (!id || row?.isAdded || disabled.has(id)) continue;
+    if (!kindAllowed(row)) continue;
     const status = getTestStatus(id, testResults);
     if (effective === "all") {
       toAdd.push(id);

@@ -42,9 +42,11 @@ export default function DisabledModelsSection({
   providerName,
   catalog = [],
   testResults = {},
+  testErrors = {},
   modelAliases = {},
   onEnable,
   onEnableAll,
+  onRetest,
   busy = false,
 }) {
   const providerLabel = providerName || "this provider";
@@ -71,9 +73,13 @@ export default function DisabledModelsSection({
         name: entry?.name || aliasNames.get(id) || id,
         type: entry?.type || "llm",
         isFree: entry?.isFree ?? null,
+        testStatus: testResults?.[id],
+        // Last failure detail, when the batch/single test recorded one.
+        error: testErrors?.[id] || entry?.error || "",
+        kind: entry?.kind || "llm",
       };
     });
-  }, [disabledIds, catalog, modelAliases]);
+  }, [disabledIds, catalog, modelAliases, testResults, testErrors]);
 
   if (rows.length === 0) return null;
 
@@ -107,28 +113,59 @@ export default function DisabledModelsSection({
         {rows.map((row) => (
           <div
             key={row.id}
-            className="flex flex-wrap items-center gap-2 py-1.5"
+            className="flex flex-wrap items-center gap-2 py-2"
             title={`${row.name} — upstream model id: ${row.id}`}
           >
             {testBadge(testResults, row.id)}
-            <span className="text-sm truncate max-w-[280px]">{row.name}</span>
-            {row.name !== row.id && (
-              <code className="text-[11px] font-mono text-text-muted bg-sidebar px-1.5 py-0.5 rounded">
-                {row.id}
+            <div className="flex min-w-0 flex-col">
+              <span className="text-sm truncate max-w-[280px]">{row.name}</span>
+              {/* The exact upstream id is always shown: it is what a request
+                  sends, and it is what the user pastes back into Add Model. */}
+              <code className="text-[11px] font-mono text-text-muted">
+                {providerLabel}/{row.id}
               </code>
-            )}
-            <span className="text-[11px] text-text-muted truncate">{providerLabel}</span>
-            {onEnable && (
-              <button
-                onClick={() => onEnable(row.id)}
-                disabled={busy}
-                className="ml-auto flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[11px] text-text-muted transition-colors hover:border-primary/40 hover:text-primary disabled:opacity-40"
-                title={`Enable ${row.id} again`}
+            </div>
+            <span className="text-[11px] text-text-muted truncate">
+              {providerLabel}
+            </span>
+            {row.error && (
+              <span
+                className="text-[11px] text-red-500 break-words min-w-0 flex-1"
+                title={row.error}
               >
-                <span className="material-symbols-outlined text-[13px]">restart_alt</span>
-                Enable
-              </button>
+                {row.error.length > 140
+                  ? `${row.error.slice(0, 140)}…`
+                  : row.error}
+              </span>
             )}
+            <div className="ml-auto flex items-center gap-1.5">
+              {onRetest && (
+                <button
+                  onClick={() => onRetest(row.id)}
+                  disabled={busy}
+                  className="flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[11px] text-text-muted transition-colors hover:border-primary/40 hover:text-primary disabled:opacity-40"
+                  title={`Test ${row.id} — enabling does not prove it works, so test it before treating it as verified`}
+                >
+                  <span className="material-symbols-outlined text-[13px]">
+                    science
+                  </span>
+                  Test
+                </button>
+              )}
+              {onEnable && (
+                <button
+                  onClick={() => onEnable(row.id)}
+                  disabled={busy}
+                  className="flex items-center gap-1 rounded-lg border border-border px-2 py-1 text-[11px] text-text-muted transition-colors hover:border-primary/40 hover:text-primary disabled:opacity-40"
+                  title={`Enable ${row.id} again. It stays unverified until a test passes.`}
+                >
+                  <span className="material-symbols-outlined text-[13px]">
+                    restart_alt
+                  </span>
+                  Enable
+                </button>
+              )}
+            </div>
           </div>
         ))}
       </div>
@@ -141,8 +178,10 @@ DisabledModelsSection.propTypes = {
   providerName: PropTypes.string,
   catalog: PropTypes.array,
   testResults: PropTypes.object,
+  testErrors: PropTypes.object,
   modelAliases: PropTypes.object,
   onEnable: PropTypes.func,
   onEnableAll: PropTypes.func,
+  onRetest: PropTypes.func,
   busy: PropTypes.bool,
 };

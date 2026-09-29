@@ -7,6 +7,7 @@ import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG, UPDATER_CONFIG } from "@/shared/constants/config";
 import { MEDIA_PROVIDER_KINDS } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import { cachedJson } from "@/shared/utils/cachedJson";
 import Button from "./Button";
 import { ConfirmModal } from "./Modal";
 import NineRemotePromoModal from "./NineRemotePromoModal";
@@ -55,18 +56,27 @@ export default function Sidebar({ onClose }) {
 
   const INSTALL_CMD = UPDATER_CONFIG.installCmdLatest;
 
+  // DashboardLayout renders TWO Sidebar instances (desktop + mobile) so the
+  // navigation markup is identical in both. That means these two effects used to
+  // fire twice per page load, and once more for every mount during navigation —
+  // /api/settings and /api/version were among the most requested endpoints in the
+  // app. cachedJson adds TTL + in-flight dedupe, so the second (and any later)
+  // consumer is a cache hit instead of a request. The settings write paths below
+  // still invalidate the cache explicitly, so this cannot serve stale data.
   useEffect(() => {
-    fetch("/api/settings")
-      .then(res => res.json())
-      .then(data => { if (data.enableTranslator) setEnableTranslator(true); })
+    cachedJson("/api/settings")
+      .then((res) => {
+        if (res.ok && res.data?.enableTranslator) setEnableTranslator(true);
+      })
       .catch(() => {});
   }, []);
 
-  // Lazy check for new npm version on mount
+  // Lazy check for a new npm version on mount
   useEffect(() => {
-    fetch("/api/version")
-      .then(res => res.json())
-      .then(data => { if (data.hasUpdate) setUpdateInfo(data); })
+    cachedJson("/api/version")
+      .then((res) => {
+        if (res.ok && res.data?.hasUpdate) setUpdateInfo(res.data);
+      })
       .catch(() => {});
   }, []);
 

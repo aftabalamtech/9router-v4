@@ -1,6 +1,7 @@
 
 import { getProviderConnectionById } from "../../../../models/index.js";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "../../../../shared/constants/providers.js";
+import { getModelCapabilities } from "../../../../shared/constants/providerCapabilities.js";
 import { GEMINI_CONFIG } from "../../../../lib/oauth/constants/oauth.js";
 import { refreshGoogleToken, updateProviderCredentials } from "../../../../sse/services/tokenRefresh.js";
 import { resolveOllamaLocalHost } from "../../../../../open-sse/config/providers.js";
@@ -9,6 +10,7 @@ import { resolveQoderModels } from "../../../../../open-sse/services/qoderModels
 import { fetchWithTimeout } from "../../../../lib/net/fetchWithTimeout.js";
 import { buildCompatibleModelsUrl } from "../../../../lib/net/compatibleUrl.js";
 import { readResponseOnce, parseErrorPayload } from "../../../../lib/net/httpBody.js";
+import { MODEL_DISCOVERY_PROVIDERS } from "../../../../shared/constants/providerCapabilities.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -420,6 +422,19 @@ const PROVIDER_MODELS_CONFIG = {
   }
 };
 
+// A provider in this map but missing from PROVIDER_MODELS_CONFIG below would
+// advertise a catalog it cannot serve, and the UI would offer a button that
+// always fails. Fail the boot of the route module rather than shipping that.
+{
+  const configKeys = new Set(Object.keys(PROVIDER_MODELS_CONFIG));
+  const missing = MODEL_DISCOVERY_PROVIDERS.filter((p) => !configKeys.has(p));
+  if (missing.length > 0) {
+    throw new Error(
+      `modelCapabilities lists providers with no /models config: ${missing.join(", ")}`
+    );
+  }
+}
+
 /**
  * GET /api/providers/[id]/models - Get models list from provider
  */
@@ -494,9 +509,10 @@ export async function GET_handler(req, res, { params }) {
 
     const config = PROVIDER_MODELS_CONFIG[connection.provider];
     if (!config) {
-      return res.status(400).json(
-        { error: `Provider ${connection.provider} does not support models listing` }
-      );
+      // Shared capability map decides this, so the UI (which greys the button
+      // out) and the route (which refuses) can never disagree.
+      const caps = getModelCapabilities(connection.provider);
+      return res.status(400).json({ error: caps.reason });
     }
 
     // Config-driven custom resolver path (OAuth refresh, non-OpenAI shape, etc.)
