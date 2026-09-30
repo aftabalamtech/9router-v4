@@ -2,24 +2,17 @@
 import { useState, useEffect } from "react";
 import PropTypes from "prop-types";
 import { Button, Badge, Input, Modal, Select } from "@/shared/components";
+import { fetchValidationResult } from "@/shared/utils/safeJson";
 
 const VALIDATION_TIMEOUT_MS = 15000;
 
-async function fetchProviderNodeValidation(payload) {
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), VALIDATION_TIMEOUT_MS);
-  try {
-    const res = await fetch("/api/provider-nodes/validate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-    return await res.json();
-  } finally {
-    window.clearTimeout(timeoutId);
-  }
-}
+// Shared reader: never throws on a non-JSON (e.g. HTML) response, so the modal
+// shows the real failure category instead of a JSON parser exception.
+const fetchProviderNodeValidation = (payload) =>
+  fetchValidationResult("/api/provider-nodes/validate", payload, {
+    timeoutMs: VALIDATION_TIMEOUT_MS,
+    label: "provider node validation",
+  });
 
 export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose, isAnthropic }) {
   const [formData, setFormData] = useState({

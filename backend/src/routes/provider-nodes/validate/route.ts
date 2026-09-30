@@ -1,6 +1,6 @@
 import { fetchWithTimeout } from "../../../lib/net/fetchWithTimeout.js";
 import { buildCompatibleChatUrl, buildCompatibleModelsUrl, buildCompatibleEmbeddingsUrl, normalizeCompatibleBaseUrl, isValidCompatibleBaseUrl } from "../../../lib/net/compatibleUrl.js";
-import { readJsonBody, readResponseOnce, parseErrorPayload } from "../../../lib/net/httpBody.js";
+import { readResponseOnce, parseErrorPayload } from "../../../lib/net/httpBody.js";
 
 // Validate URL format
 const isValidUrl = isValidCompatibleBaseUrl;
@@ -21,7 +21,9 @@ const getErrorMessage = (error) => {
 const getModelsErrorMessage = (status) => {
   if (status === 401 || status === 403) return "API key unauthorized";
   if (status === 404) return "/models endpoint not found - try chat validation with model ID";
-  if (status >= 500) return "Server error - try again later";
+  if (status === 405) return "/models endpoint does not allow this method";
+  if (status === 429) return "Rate limited by upstream (HTTP 429) - retry later or check quota";
+  if (status >= 500) return "Upstream server error - try again later";
   return `Unexpected response (${status})`;
 };
 
@@ -30,7 +32,8 @@ const getChatErrorMessage = (status) => {
   if (status === 401 || status === 403) return "API key unauthorized";
   if (status === 400) return "Invalid model or bad request";
   if (status === 404) return "Chat endpoint not found";
-  if (status >= 500) return "Server error - try again later";
+  if (status === 429) return "Rate limited by upstream (HTTP 429) - retry later or check quota";
+  if (status >= 500) return "Upstream server error - try again later";
   return `Chat request failed (${status})`;
 };
 
@@ -89,8 +92,17 @@ export async function POST_handler(req, res) {
         body: JSON.stringify({ model: modelId.trim(), input: "ping" })
       });
       if (embedRes.ok) {
-        const { json: data } = await readJsonBody(embedRes);
+        const { json: data, nonJsonReason } = await readResponseOnce(embedRes);
         const dims = Array.isArray(data?.data?.[0]?.embedding) ? data.data[0].embedding.length : null;
+        // 2xx without an embedding vector is not a usable embeddings endpoint
+        // (typically an HTML page from a wrong base URL).
+        if (dims === null && data === null) {
+          return res.json({
+            valid: false,
+            method: "embeddings",
+            error: `Embeddings endpoint returned ${nonJsonReason || "an unexpected body"} (HTTP ${embedRes.status}). Check the base URL points at the API root.`,
+          });
+        }
         return res.json({ valid: true, method: "embeddings", dimensions: dims });
       }
       if (embedRes.status === 401 || embedRes.status === 403) {
@@ -109,7 +121,10 @@ export async function POST_handler(req, res) {
       const normalizedBase = trimBaseUrl(baseUrl);
 
       const modelsUrl = buildCompatibleModelsUrl(normalizedBase, "anthropic-compatible-");
-      const res = await fetchWithTimeout(modelsUrl, {
+      // Never name an upstream response `res`: it would shadow the Express
+      // response and every `res.json(...)` below would write to the UPSTREAM
+      // stream instead of replying to the client.
+      const modelsRes = await fetchWithTimeout(modelsUrl, {
         method: "GET",
         headers: {
           ...(apiKey ? { "x-api-key": apiKey } : {}),
@@ -118,9 +133,19 @@ export async function POST_handler(req, res) {
         }
       });
 
-      if (res.ok) return res.json({ valid: true });
+      if (modelsRes.ok) {
+        const { json, nonJsonReason } = await readResponseOnce(modelsRes);
+        if (json === null) {
+          return res.json({
+            valid: false,
+            status: modelsRes.status,
+            error: `Upstream ${modelsUrl} returned ${nonJsonReason} instead of a model list. Check the base URL points at the API root.`,
+          });
+        }
+        return res.json({ valid: true });
+      }
 
-      if (isAuthFailure(res.status)) {
+      if (isAuthFailure(modelsRes.status)) {
         return res.json({ valid: false, error: "API key unauthorized" });
       }
 
@@ -151,44 +176,60 @@ export async function POST_handler(req, res) {
         });
       }
 
-      return res.json({ valid: false, error: getModelsErrorMessage(res.status) });
+      return res.json({ valid: false, error: getModelsErrorMessage(modelsRes.status) });
     }
 
     // OpenAI Compatible Validation (Default)
     const normalizedBase = trimBaseUrl(baseUrl);
     const modelsUrl = buildCompatibleModelsUrl(normalizedBase);
     const requestHeaders: Record<string, string> = authHeaders(apiKey, customHeaders);
-    const res = await fetchWithTimeout(modelsUrl, { headers: requestHeaders });
+    // See the Anthropic branch above: naming this `res` silently replied to the
+    // upstream stream instead of the client.
+    const modelsRes = await fetchWithTimeout(modelsUrl, { headers: requestHeaders });
 
-    if (res.ok) {
+    if (modelsRes.ok) {
       // Surface the discovered model list so the caller can offer one-click
       // import right after a successful Test Connection.
       let models: Array<{ id: string; name?: string }> = [];
-      try {
-        const { json: data } = await readJsonBody(res);
-        const raw = Array.isArray(data) ? data : (data?.data || data?.models || data?.results || []);
-        if (Array.isArray(raw)) {
-          models = raw
-            .map((m: { id?: unknown; name?: unknown; model?: unknown }) => {
-              const id = typeof m === "string" ? m : (m?.id || m?.model || "");
-              if (!id || typeof id !== "string") return null;
-              const name = typeof m === "object" && m && typeof (m as { name?: unknown }).name === "string" ? (m as { name: string }).name : id;
-              return { id, name };
-            })
-            .filter(Boolean)
-            .slice(0, 500);
-        }
-      } catch { /* body wasn't JSON — validation still succeeded */ }
+      const { json: data, nonJsonReason } = await readResponseOnce(modelsRes);
+      // Do NOT default a missing list field to []: an HTML/empty/text body
+      // parses to `null`, and defaulting would make it indistinguishable from a
+      // real, legitimately empty model list.
+      const listCandidate = Array.isArray(data) ? data : (data?.data ?? data?.models ?? data?.results);
+      const isModelList = Array.isArray(listCandidate);
+      if (isModelList) {
+        models = listCandidate
+          .map((m: { id?: unknown; name?: unknown; model?: unknown }) => {
+            const id = typeof m === "string" ? m : (m?.id || m?.model || "");
+            if (!id || typeof id !== "string") return null;
+            const name = typeof m === "object" && m && typeof (m as { name?: unknown }).name === "string" ? (m as { name: string }).name : id;
+            return { id, name };
+          })
+          .filter(Boolean)
+          .slice(0, 500);
+      }
+      // A 2xx that is not a model list is NOT a valid connection. Reporting it
+      // as valid is what hid an HTML marketing/proxy page behind a green
+      // "Valid" badge, and is what produced the raw `Unexpected token '<'`
+      // parser error once a parse was attempted.
+      if (!isModelList) {
+        return res.json({
+          valid: false,
+          status: modelsRes.status,
+          method: "models",
+          error: `Upstream ${modelsUrl} returned ${nonJsonReason || "an unexpected body"} instead of a model list. Check the base URL points at the API root, e.g. https://host/v1.`,
+        });
+      }
       return res.json({ valid: true, method: "models", models });
     }
 
-    if (isAuthFailure(res.status)) {
+    if (isAuthFailure(modelsRes.status)) {
       return res.json({ valid: false, error: "API key unauthorized" });
     }
 
     // Some gateways reject GET /models with 405 (method not allowed) even
     // though they serve chat — treat that as "reachable, no listing".
-    if (res.status === 405) {
+    if (modelsRes.status === 405) {
       return res.json({ valid: true, method: "no-models", models: [], warning: "Upstream has no /models endpoint — add model IDs manually." });
     }
 
@@ -209,11 +250,16 @@ export async function POST_handler(req, res) {
         })
       });
       if (chatRes.ok) {
-        const { json } = await readJsonBody(chatRes);
+        const { json, nonJsonReason } = await readResponseOnce(chatRes);
         if (apiType === "responses" ? Boolean(json && ("output" in json || "id" in json)) : Boolean(json && ("choices" in json || "id" in json))) {
           return res.json({ valid: true, status: chatRes.status, method: apiType === "responses" ? "responses" : "chat" });
         }
-        return res.json({ valid: false, status: chatRes.status, method: apiType === "responses" ? "responses" : "chat", error: "HTTP success, but response did not match expected OpenAI-compatible format." });
+        return res.json({
+          valid: false,
+          status: chatRes.status,
+          method: apiType === "responses" ? "responses" : "chat",
+          error: `Upstream returned ${nonJsonReason || "a body that is not an OpenAI-compatible response"} (HTTP ${chatRes.status}). Check the base URL and API type.`,
+        });
       }
       const chatError = await statusMessage(chatRes);
       if (isAuthFailure(chatRes.status)) {
@@ -227,7 +273,7 @@ export async function POST_handler(req, res) {
       });
     }
 
-    return res.json({ valid: false, error: getModelsErrorMessage(res.status) });
+    return res.json({ valid: false, error: getModelsErrorMessage(modelsRes.status) });
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     console.error("Error validating provider node:", {
@@ -238,7 +284,10 @@ export async function POST_handler(req, res) {
     });
     return res.status(500).json({
       valid: false,
-      error: errorMessage
+      error: errorMessage,
+      // Category only. The raw exception (e.g. a JSON parser message) is
+      // logged, never returned, so the UI cannot show a parser error.
+      category: "internal_error",
     });
   }
 }

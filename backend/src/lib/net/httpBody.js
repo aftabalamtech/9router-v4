@@ -35,6 +35,22 @@ export async function readJsonBody(res) {
   }
 }
 
+const HTML_BODY = /^\s*(<!doctype\s+html|<html[\s>])/i;
+
+/**
+ * Describe a non-JSON body so an HTML page relayed by an upstream (marketing
+ * site, proxy/CDN error page, gateway timeout) is reported as such instead of
+ * surfacing as a JSON parser error.
+ */
+export function describeNonJsonBody(text, contentType = "") {
+  const raw = String(text || "").trim();
+  if (!raw) return "empty response body";
+  if (HTML_BODY.test(raw) || /text\/html/i.test(contentType)) {
+    return "HTML page instead of a JSON API response (wrong base URL, proxy/CDN page, or the endpoint is not an API)";
+  }
+  return `non-JSON response (${contentType || "unknown content type"})`;
+}
+
 /**
  * Build an actionable error message from an already-read body.
  * Precedence: error.message → message → error → raw text.
@@ -67,11 +83,17 @@ export function parseErrorPayload(text, { status } = {}) {
  */
 export async function readResponseOnce(res) {
   const { json, text } = await readJsonBody(res);
+  const contentType = res?.headers?.get?.("content-type") || "";
   return {
     status: res?.status ?? null,
     okStatus: !!res?.ok,
     json,
     text,
     parsed: json !== null,
+    contentType,
+    // True when the body is not JSON (HTML page, plain text, empty). Callers
+    // must not treat a 2xx status with `parsed: false` as a usable API answer.
+    nonJsonBody: json === null,
+    nonJsonReason: json === null ? describeNonJsonBody(text, contentType) : null,
   };
 }

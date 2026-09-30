@@ -172,7 +172,13 @@ export async function buildAutoRouter(): Promise<Router> {
           } catch (err) {
             console.error(`[route] ${method} ${expressPath}:`, err);
             if (!res.headersSent) {
-              res.status(500).json({ error: (err as Error).message });
+              // Return a stable, non-leaking message. Previously the raw
+              // exception text was sent to the browser, so internal parser /
+              // library errors surfaced verbatim in the dashboard UI.
+              res.status(500).json({
+                error: "Internal server error while handling the request",
+                path: expressPath,
+              });
             }
           }
         });

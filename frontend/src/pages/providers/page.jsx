@@ -26,27 +26,21 @@ import { useNotificationStore } from "@/store/notificationStore";
 import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
 import { getProviderDisplayName } from "@/shared/utils/providerNaming";
 import { parseCurlImport, maskCurlSecrets } from "@/shared/utils/curlImport";
+import { fetchValidationResult } from "@/shared/utils/safeJson";
 import useConnectionEvents from "@/shared/hooks/useConnectionEvents";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import ModelAvailabilityBadge from "./components/ModelAvailabilityBadge";
 
 const VALIDATION_TIMEOUT_MS = 15000;
 
-async function fetchProviderNodeValidation(payload) {
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), VALIDATION_TIMEOUT_MS);
-  try {
-    const res = await fetch("/api/provider-nodes/validate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
-    return await res.json();
-  } finally {
-    window.clearTimeout(timeoutId);
-  }
-}
+// A non-JSON reply (upstream HTML relayed by the backend, a Render proxy error
+// page, a login redirect) previously threw `Unexpected token '<' ...`. The
+// shared reader classifies the failure instead of surfacing a parser message.
+const fetchProviderNodeValidation = (payload) =>
+  fetchValidationResult("/api/provider-nodes/validate", payload, {
+    timeoutMs: VALIDATION_TIMEOUT_MS,
+    label: "provider node validation",
+  });
 
 function getStatusDisplay(connected, error, errorCode) {
   const parts = [];
