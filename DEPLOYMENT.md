@@ -100,6 +100,17 @@ No migration command is needed — the server migrates automatically on boot
 4. Storage: Render disks are persistent only on paid instances — mount a disk at
    `/data` for SQLite, or attach Render **PostgreSQL** and set `DATABASE_URL`
    (recommended on Render).
+   - If you mount a disk, mount it at **`/data`**, which is the image default for
+     `DATA_DIR`. Mounting elsewhere (for example `/var/data`) without updating
+     `DATA_DIR` logs `[DATA_DIR] ... is not writable → falling back` and moves
+     SQLite, the JWT/API-key secrets and the machine ID into a container-local
+     directory that is lost on every redeploy. PostgreSQL does **not** protect
+     those files.
+   - The container runs as the non-root `appuser`. A disk owned by root is not
+     writable; set `DATA_DIR` to a path the service user can write, or grant the
+     service user access to the mount.
+   - The app verifies writability by creating and removing a probe file, so a
+     read-only mount is detected even when directory creation appears to succeed.
 5. Logs in the dashboard **Logs** tab; **Manual Deploy → Redeploy** or push to redeploy.
    Render restarts crashed services automatically.
 

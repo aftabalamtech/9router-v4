@@ -16,17 +16,19 @@ export function getDataDir() {
   if (!configured) return defaultDir();
   try {
     fs.mkdirSync(configured, { recursive: true });
+    // accessSync can report writable for root even on read-only mounts. Verify
+    // actual creation, then remove probe file before using configured path.
+    const probe = path.join(configured, `.9router-write-test-${process.pid}-${Date.now()}`);
+    const fd = fs.openSync(probe, "wx", 0o600);
+    fs.closeSync(fd);
+    fs.unlinkSync(probe);
     return configured;
   } catch (e) {
     if (e?.code === "EACCES" || e?.code === "EPERM") {
-      // Actionable, honest warning: with DATABASE_URL set the app's data lives
-      // in PostgreSQL and nothing is lost; on SQLite this fallback directory
-      // is EPHEMERAL on PaaS containers (data is wiped on redeploy).
       console.warn(
-        `[DATA_DIR] '${configured}' is not writable → falling back to ~/.${APP_NAME}. ` +
-        (process.env.DATABASE_URL
-          ? `DATABASE_URL is set, so application data is stored in PostgreSQL and is NOT affected. `
-          : `WARNING: no DATABASE_URL set — SQLite data in this fallback directory will NOT survive container redeploys; attach a persistent disk at '${configured}' or unset DATA_DIR. `)
+        `[DATA_DIR] '${configured}' is not writable → falling back to ${defaultDir()}. ` +
+        `Filesystem-backed state, secrets, and SQLite will use this fallback; ` +
+        `PostgreSQL does not persist those files. Fix mount ownership/permissions or set a writable DATA_DIR.`
       );
       return defaultDir();
     }

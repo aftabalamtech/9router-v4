@@ -44,7 +44,9 @@ COPY --from=builder /app/frontend/dist ./frontend/dist
 # Generated browser profiles are excluded by .dockerignore.
 COPY backend/src ./backend/src
 
-# Run as non-root. /data is the SQLite volume mount point (override at runtime).
+# Run as non-root. Render disks commonly arrive owned by root; pre-create /data
+# with appuser ownership, then restore ownership after platform mounts where
+# permitted. Runtime DATA_DIR defaults to this writable mount.
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
   && mkdir -p /data && chown -R appuser:appgroup /app /data
 USER appuser

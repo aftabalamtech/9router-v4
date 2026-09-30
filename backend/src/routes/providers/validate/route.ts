@@ -7,37 +7,46 @@ import { openaiToCommandCode } from "../../../../open-sse/translator/request/ope
 import { PROVIDER_ENDPOINTS } from "../../../shared/constants/config.js";
 import { normalizeProviderId } from "../../../lib/providerNormalization.js";
 import { fetchWithTimeout } from "../../../lib/net/fetchWithTimeout.js";
-
-const fetchWithTimeout = (url, options = {}, timeout = 10000) => {
-  const signal = options.signal || AbortSignal.timeout(timeout);
-  return fetch(url, { ...options, signal });
-};
-
-async function readResponseError(response) {
-  const text = await response.text().catch(() => "");
-  if (!text) return "";
-  try {
-    const data = JSON.parse(text);
-    return data?.error?.message || data?.error || data?.message || data?.msg || text;
-  } catch {
-    return text;
-  }
-}
+import { buildCompatibleChatUrl, buildCompatibleModelsUrl, buildCompatibleEmbeddingsUrl } from "../../../lib/net/compatibleUrl.js";
+import { parseErrorPayload, readResponseOnce } from "../../../lib/net/httpBody.js";
 
 function isAuthFailure(status) {
   return status === 401 || status === 403;
 }
 
-function isReachableInferenceStatus(status) {
-  return !isAuthFailure(status) && status < 500;
+function sanitizeUpstreamDetail(value) {
+  return String(value || "")
+    .replace(/Bearer\s+[^\s"'<>]+/gi, "Bearer [redacted]")
+    .replace(/(?:api[_-]?key|token|secret)(\s*[=:]\s*)[^\s,;"']+/gi, "$1[redacted]")
+    .slice(0, 240);
 }
 
-function normalizeAnthropicBaseUrl(baseUrl) {
-  let normalizedBase = baseUrl?.trim().replace(/\/$/, "") || "";
-  if (normalizedBase.endsWith("/messages")) {
-    normalizedBase = normalizedBase.slice(0, -9);
-  }
-  return normalizedBase;
+function classifyUpstreamStatus(status, detail = "") {
+  if (status === 401 || status === 403) return "Invalid API key (upstream rejected credentials)";
+  if (status === 429) return "Rate limited by upstream (HTTP 429); retry later or check provider quota";
+  if (status >= 500) return `Upstream server error (HTTP ${status}); retry later`;
+  if (status === 404) return "Upstream endpoint or model not found (HTTP 404); check base URL and model ID";
+  if (status === 405) return "Upstream endpoint does not support this method (HTTP 405); check API format and endpoint";
+  if (status >= 400) return `Upstream rejected validation request (HTTP ${status})${detail ? `: ${sanitizeUpstreamDetail(detail)}` : ""}`;
+  return `Unexpected upstream response (HTTP ${status})`;
+}
+
+function classifyNetworkError(error) {
+  const code = error?.cause?.code || error?.code;
+  if (error?.name === "TimeoutError" || error?.name === "AbortError" || code === "ETIMEDOUT" || error?.cause?.name === "TimeoutError") return "Upstream request timed out; check provider availability and network";
+  if (code === "ENOTFOUND" || code === "EAI_AGAIN") return "DNS lookup failed for upstream host; check base URL and server DNS";
+  if (code === "ECONNREFUSED") return "Connection refused by upstream; check host and port";
+  if (code && /CERT|TLS|SSL/i.test(code)) return "TLS certificate validation failed for upstream";
+  return "Could not connect to upstream; check base URL, DNS, TLS, and outbound network access";
+}
+
+async function upstreamFailure(response) {
+  const parsed = await readResponseOnce(response);
+  return classifyUpstreamStatus(response.status, parseErrorPayload(parsed.text, { status: response.status }));
+}
+
+function normalizedApiKey(value) {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
@@ -119,10 +128,11 @@ export async function POST_handler(req, res) {
   try {
     const body = req.body;
     const provider = normalizeProviderId(body.provider);
-    const { apiKey, providerSpecificData } = body;
+    const apiKey = normalizedApiKey(body.apiKey);
+    const { providerSpecificData } = body;
 
     const isNoAuth = AI_PROVIDERS[provider]?.noAuth === true;
-    if (!provider || (!apiKey && provider !== "ollama-local" && !isNoAuth)) {
+    if (!provider || (!apiKey && !isOpenAICompatibleProvider(provider) && !isAnthropicCompatibleProvider(provider) && !isCustomEmbeddingProvider(provider) && provider !== "ollama-local" && !isNoAuth)) {
       return res.status(400).json({ error: "Provider and API key required" });
     }
 
@@ -136,23 +146,31 @@ export async function POST_handler(req, res) {
         if (!node) {
           return res.status(404).json({ error: "OpenAI Compatible node not found" });
         }
-        const baseUrl = node.baseUrl?.replace(/\/$/, "");
-        const modelsUrl = `${baseUrl}/models`;
+        const modelsUrl = buildCompatibleModelsUrl(node.baseUrl, provider);
+        if (!modelsUrl) return res.json({ valid: false, error: "Invalid configured base URL; enter an HTTP(S) API base URL" });
         const modelsRes = await fetchWithTimeout(modelsUrl, {
-          headers: { "Authorization": `Bearer ${apiKey}` },
+          headers: apiKey ? { "Authorization": `Bearer ${apiKey}` } : {},
         });
         if (modelsRes.ok) {
-          return res.json({ valid: true, error: null });
+          const parsed = await readResponseOnce(modelsRes);
+          if (parsed.json && (Array.isArray(parsed.json) || Array.isArray(parsed.json.data) || Array.isArray(parsed.json.models) || Array.isArray(parsed.json.results))) {
+            return res.json({ valid: true, error: null });
+          }
+          return res.json({ valid: false, error: "Upstream /models returned malformed data; verify configured endpoint and response format" });
         }
         if (isAuthFailure(modelsRes.status)) {
+          await readResponseOnce(modelsRes);
           return res.json({ valid: false, error: "Invalid API key" });
         }
+        const modelsError = await upstreamFailure(modelsRes);
+        // A missing or unsupported model-list route is not evidence of invalid credentials.
+        if (![404, 405].includes(modelsRes.status)) return res.json({ valid: false, error: modelsError });
 
         const model = body.defaultModel || body.modelId || providerSpecificData?.defaultModel || "test";
-        const chatRes = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
+        const chatRes = await fetchWithTimeout(buildCompatibleChatUrl(node.baseUrl, provider), {
           method: "POST",
           headers: {
-            "Authorization": `Bearer ${apiKey}`,
+            ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -162,10 +180,11 @@ export async function POST_handler(req, res) {
             messages: [{ role: "user", content: "ping" }],
           }),
         });
-        isValid = chatRes.ok || isReachableInferenceStatus(chatRes.status);
+        isValid = chatRes.ok;
+        const chatError = isValid ? "" : await upstreamFailure(chatRes);
         return res.json({
           valid: isValid,
-          error: isValid ? null : (await readResponseError(chatRes)) || "Invalid API key or base URL",
+          error: isValid ? null : chatError,
         });
       }
 
@@ -175,28 +194,34 @@ export async function POST_handler(req, res) {
         if (!node) {
           return res.status(404).json({ error: "Custom Embedding node not found" });
         }
-        const baseUrl = node.baseUrl?.replace(/\/$/, "");
-        const modelsRes = await fetchWithTimeout(`${baseUrl}/models`, {
-          headers: { "Authorization": `Bearer ${apiKey}` },
+        const modelsUrl = buildCompatibleModelsUrl(node.baseUrl, provider);
+        if (!modelsUrl) return res.json({ valid: false, error: "Invalid configured base URL; enter an HTTP(S) API base URL" });
+        const modelsRes = await fetchWithTimeout(modelsUrl, {
+          headers: apiKey ? { "Authorization": `Bearer ${apiKey}` } : {},
         });
         if (modelsRes.ok) {
-          return res.json({ valid: true });
+          const parsed = await readResponseOnce(modelsRes);
+          if (parsed.json && (Array.isArray(parsed.json) || Array.isArray(parsed.json.data) || Array.isArray(parsed.json.models) || Array.isArray(parsed.json.results))) return res.json({ valid: true });
+          return res.json({ valid: false, error: "Upstream /models returned malformed data; verify configured endpoint and response format" });
         }
         // Auth errors are definitive
         if (modelsRes.status === 401 || modelsRes.status === 403) {
+          await readResponseOnce(modelsRes);
           return res.json({ valid: false, error: "Invalid API key" });
         }
+        const modelsError = await upstreamFailure(modelsRes);
+        if (![404, 405].includes(modelsRes.status)) return res.json({ valid: false, error: modelsError });
         // Fallback: probe /embeddings with a common test model — many providers lack /models
-        const embedRes = await fetchWithTimeout(`${baseUrl}/embeddings`, {
+        const embedRes = await fetchWithTimeout(buildCompatibleEmbeddingsUrl(node.baseUrl), {
           method: "POST",
-          headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          headers: { ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}), "Content-Type": "application/json" },
           body: JSON.stringify({ model: "test", input: "ping" }),
         });
-        // 401/403 = bad key; anything else (including 400 "model not found") means key works
-        isValid = embedRes.status !== 401 && embedRes.status !== 403;
+        isValid = embedRes.ok;
+        const embedError = isValid ? "" : await upstreamFailure(embedRes);
         return res.json({
           valid: isValid,
-          error: isValid ? null : "Invalid API key",
+          error: isValid ? null : embedError,
         });
       }
 
@@ -206,32 +231,36 @@ export async function POST_handler(req, res) {
           return res.status(404).json({ error: "Anthropic Compatible node not found" });
         }
 
-        const normalizedBase = normalizeAnthropicBaseUrl(node.baseUrl);
-
-        const modelsUrl = `${normalizedBase}/models`;
+        const modelsUrl = buildCompatibleModelsUrl(node.baseUrl, provider);
+        if (!modelsUrl) return res.json({ valid: false, error: "Invalid configured base URL; enter an HTTP(S) API base URL" });
 
         const modelsRes = await fetchWithTimeout(modelsUrl, {
           headers: {
-            "x-api-key": apiKey,
+            ...(apiKey ? { "x-api-key": apiKey } : {}),
             "anthropic-version": "2023-06-01",
-            "Authorization": `Bearer ${apiKey}`
+            ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {})
           },
         });
 
         if (modelsRes.ok) {
-          return res.json({ valid: true, error: null });
+          const parsed = await readResponseOnce(modelsRes);
+          if (parsed.json && (Array.isArray(parsed.json) || Array.isArray(parsed.json.data) || Array.isArray(parsed.json.models) || Array.isArray(parsed.json.results))) return res.json({ valid: true, error: null });
+          return res.json({ valid: false, error: "Upstream /models returned malformed data; verify configured endpoint and response format" });
         }
         if (isAuthFailure(modelsRes.status)) {
+          await readResponseOnce(modelsRes);
           return res.json({ valid: false, error: "Invalid API key" });
         }
+        const modelsError = await upstreamFailure(modelsRes);
+        if (![404, 405].includes(modelsRes.status)) return res.json({ valid: false, error: modelsError });
 
         const model = body.defaultModel || body.modelId || providerSpecificData?.defaultModel || "test";
-        const messagesRes = await fetchWithTimeout(`${normalizedBase}/messages`, {
+        const messagesRes = await fetchWithTimeout(buildCompatibleChatUrl(node.baseUrl, provider), {
           method: "POST",
           headers: {
-            "x-api-key": apiKey,
+            ...(apiKey ? { "x-api-key": apiKey } : {}),
             "anthropic-version": "2023-06-01",
-            "Authorization": `Bearer ${apiKey}`,
+            ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
@@ -240,10 +269,11 @@ export async function POST_handler(req, res) {
             messages: [{ role: "user", content: "ping" }],
           }),
         });
-        isValid = messagesRes.ok || isReachableInferenceStatus(messagesRes.status);
+        isValid = messagesRes.ok;
+        const messagesError = isValid ? "" : await upstreamFailure(messagesRes);
         return res.json({
           valid: isValid,
-          error: isValid ? null : (await readResponseError(messagesRes)) || "Invalid API key or base URL",
+          error: isValid ? null : messagesError,
         });
       }
 
@@ -696,7 +726,7 @@ export async function POST_handler(req, res) {
         }
       }
     } catch (err) {
-      error = err.message;
+      error = classifyNetworkError(err);
       isValid = false;
     }
 
@@ -705,7 +735,7 @@ export async function POST_handler(req, res) {
       error: isValid ? null : (error || "Invalid API key"),
     });
   } catch (error) {
-    console.log("Error validating API key:", error);
-    return res.status(500).json({ error: "Validation failed" });
+    console.error("Error validating API key:", classifyNetworkError(error));
+    return res.status(500).json({ valid: false, error: classifyNetworkError(error) });
   }
 }

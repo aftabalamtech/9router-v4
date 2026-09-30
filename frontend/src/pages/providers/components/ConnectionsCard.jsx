@@ -214,6 +214,7 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
   });
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
+  const [validationError, setValidationError] = useState("");
   const [saving, setSaving] = useState(false);
 
   const providerInfo = AI_PROVIDERS[provider];
@@ -221,6 +222,7 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
 
   const handleValidate = async () => {
     setValidating(true);
+    setValidationError("");
     try {
       const res = await fetch("/api/providers/validate", {
         method: "POST",
@@ -229,7 +231,11 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
       });
       const data = await res.json();
       setValidationResult(data.valid ? "success" : "failed");
-    } catch { setValidationResult("failed"); }
+      setValidationError(data.valid ? "" : (data.error || "Validation failed"));
+    } catch (error) {
+      setValidationResult("failed");
+      setValidationError(error.name === "AbortError" ? "Validation timed out" : "Could not reach 9Router API");
+    }
     finally { setValidating(false); }
   };
 
@@ -239,7 +245,7 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
     try {
       let isValid = false;
       try {
-        setValidating(true); setValidationResult(null);
+        setValidating(true); setValidationResult(null); setValidationError("");
         const res = await fetch("/api/providers/validate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -248,7 +254,11 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
         const data = await res.json();
         isValid = !!data.valid;
         setValidationResult(isValid ? "success" : "failed");
-      } catch { setValidationResult("failed"); }
+        setValidationError(isValid ? "" : (data.error || "Validation failed"));
+      } catch (error) {
+        setValidationResult("failed");
+        setValidationError(error.name === "AbortError" ? "Validation timed out" : "Could not reach 9Router API");
+      }
       finally { setValidating(false); }
       await onSave({
         name: formData.name,
@@ -285,11 +295,12 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
             </Button>
           </div>
         </div>
-        {validationResult && (
+        {validationResult && <div className="flex flex-col gap-1">
           <Badge variant={validationResult === "success" ? "success" : "error"}>
             {validationResult === "success" ? "Valid" : "Invalid"}
           </Badge>
-        )}
+          {validationResult === "failed" && validationError && <span className="text-sm text-red-500 break-words">{validationError}</span>}
+        </div>}
         <div>
           <label className="text-xs text-text-muted mb-1 block">Priority</label>
           <input type="number" className="w-full px-3 py-2 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary" value={formData.priority} onChange={(e) => setFormData({ ...formData, priority: Number.parseInt(e.target.value) || 1 })} />

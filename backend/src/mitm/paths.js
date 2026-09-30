@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-const APP_NAME = "9router";
+const APP_NAME = "9router-v3";
 
 function defaultDir() {
   if (process.platform === "win32") {
@@ -16,15 +16,11 @@ function getDataDir() {
   if (!configured) return defaultDir();
   try {
     fs.mkdirSync(configured, { recursive: true });
+    fs.accessSync(configured, fs.constants.W_OK);
     return configured;
   } catch (e) {
     if (e?.code === "EACCES" || e?.code === "EPERM") {
-      console.warn(
-        `[DATA_DIR] '${configured}' is not writable → falling back to ~/.${APP_NAME}. ` +
-        (process.env.DATABASE_URL
-          ? `DATABASE_URL is set, so application data is stored in PostgreSQL and is NOT affected.`
-          : `WARNING: without DATABASE_URL, SQLite data here will NOT survive container redeploys.`)
-      );
+      console.warn(`[DATA_DIR] '${configured}' is not writable → falling back to ${defaultDir()}. Filesystem-backed state, secrets, and SQLite use this fallback; PostgreSQL does not persist these files. Fix mount ownership/permissions or set a writable DATA_DIR.`);
       return defaultDir();
     }
     throw e;

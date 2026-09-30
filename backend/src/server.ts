@@ -8,9 +8,9 @@ import { authMiddleware } from "./middleware/auth.js";
 import { buildAutoRouter } from "./autoRouter.js";
 import { getDbDiagnostics } from "./lib/db/diagnostics.js";
 import { initDb } from "./lib/db/index.js";
+import { DATA_DIR } from "./lib/dataDir.js";
 
 const PORT = Number(process.env.PORT) || 3001;
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5177";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FRONTEND_DIST = path.resolve(__dirname, "../../frontend/dist");
 
@@ -19,10 +19,18 @@ const app = express();
 // ─── Security ─────────────────────────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
 
-// ─── CORS ─────────────────────────────────────────────────────────────────────
+// Same-origin production traffic and the dev Vite proxy both send no CORS
+// preflight, so reflect-back stays the default. When CORS_ORIGINS is set the
+// allowlist is enforced instead of reflection, which is the only opt-in change
+// to cross-origin behaviour.
+const configuredOrigins = new Set(
+  (process.env.CORS_ORIGINS || "").split(",").map((v) => v.trim()).filter(Boolean)
+);
 app.use(cors({
-  origin: (origin, callback) => {
-    callback(null, origin || true);
+  origin(origin, callback) {
+    if (configuredOrigins.size === 0) return callback(null, origin || true);
+    if (!origin || configuredOrigins.has(origin)) return callback(null, true);
+    return callback(null, false);
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -73,7 +81,15 @@ app.get("/api/health", async (_req, res) => {
   } catch {
     database = { status: "unavailable" };
   }
-  res.json({ status: "ok", version: "3.0.0", ts: Date.now(), database });
+  // Keep 200 for platform probes: this process is listening and routes are
+  // mounted, and readiness of the DB is reported in the payload. Returning 503
+  // here previously made Render treat a booting service as failed.
+  res.json({
+    status: "ok",
+    version: "3.0.0",
+    ts: Date.now(),
+    database,
+  });
 });
 
 // ─── Auth Middleware ───────────────────────────────────────────────────────────
@@ -165,7 +181,7 @@ async function start() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`\n🚀 9Router V3 Backend running on http://localhost:${PORT}`);
-    console.log(`   Frontend origin: ${FRONTEND_ORIGIN}`);
+    console.log(`   Data dir: ${DATA_DIR}`);
     console.log(`   Environment: ${process.env.NODE_ENV || "development"}\n`);
   });
 }

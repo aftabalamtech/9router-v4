@@ -133,6 +133,8 @@ Repo service → Dockerfile detected via `railway.toml`. Set Variables from `.en
 
 Docker web service from the repo, env vars from `.env.example` (leave injected `PORT`), health check `/api/health`. Mount a disk at `/data` (paid) or attach Render PostgreSQL + `DATABASE_URL` (recommended). Logs tab for output, Manual Deploy for redeploys, automatic restarts on crash.
 
+If the log shows `[DATA_DIR] '/var/data' is not writable → falling back`, the disk is mounted at a different path than `DATA_DIR`. Point `DATA_DIR` at the mount (default `/data`) or mount at the configured path. PostgreSQL keeps application rows only — the dashboard JWT secret, API-key secret, machine ID, SQLite file and tunnel/mitm caches stay on that filesystem and are lost on redeploy if it is ephemeral.
+
 ## VPS deployment
 
 Install Docker (`curl -fsSL https://get.docker.com | sh`), clone, `cp .env.example .env` (fill secrets), `docker compose up -d --build`, verify `/api/health`. Put Nginx/Caddy in front for HTTPS (proxy `127.0.0.1:3001`, disable buffering for SSE, 300s timeouts), `restart: unless-stopped` is already in compose. Full proxy sample in `DEPLOYMENT.md`.
