@@ -43,12 +43,16 @@ const trimBaseUrl = normalizeCompatibleBaseUrl;
 
 function authHeaders(apiKey, extra = {}) {
   const headers = { ...extra };
-  const authKey = Object.keys(headers).find((key) => key.toLowerCase() === "authorization");
+  // A key pasted from a shell/editor commonly carries a trailing newline or
+  // space. Sending it verbatim yields `Bearer cc_xxx\n`, which upstreams reject
+  // as an invalid key — the exact "valid key, still unauthorized" report.
+  const key = typeof apiKey === "string" ? apiKey.trim() : apiKey;
+  const authKey = Object.keys(headers).find((k) => k.toLowerCase() === "authorization");
   if (authKey) {
     const value = String(headers[authKey]);
-    if (/^bearer\s*$/i.test(value) && apiKey) headers[authKey] = `Bearer ${apiKey}`;
-  } else if (apiKey) {
-    headers.Authorization = `Bearer ${apiKey}`;
+    if (/^bearer\s*$/i.test(value) && key) headers[authKey] = `Bearer ${key}`;
+  } else if (key) {
+    headers.Authorization = `Bearer ${key}`;
   }
   return headers;
 }
@@ -59,6 +63,20 @@ async function statusMessage(response) {
   return `${response.status}: ${String(detail).slice(0, 240)}`;
 }
 
+/**
+ * Auth-failure message that keeps the upstream reason ("Missing API key" vs
+ * "Invalid or revoked API key") so the user can tell a rejected key from a key
+ * that never reached the provider. The key itself is never included: an
+ * upstream that echoes the credential back must not relay it to the browser.
+ */
+function authFailureMessage(detail, fallback = "API key unauthorized", apiKey = "") {
+  let reason = String(detail || "").replace(/Bearer\s+\S+/gi, "Bearer [redacted]");
+  const key = typeof apiKey === "string" ? apiKey.trim() : "";
+  if (key.length >= 8) reason = reason.split(key).join("[redacted]");
+  reason = reason.trim();
+  return reason ? `${fallback} - upstream said: ${reason}` : fallback;
+}
+
 // POST /api/provider-nodes/validate - Validate API key against base URL
 // API key is OPTIONAL: self-hosted gateways (LM Studio, Ollama OpenAI shim,
 // LiteLLM, vLLM…) frequently run unauthenticated. An empty key must validate
@@ -66,7 +84,8 @@ async function statusMessage(response) {
 export async function POST_handler(req, res) {
   try {
     const body = req.body;
-    const { baseUrl, apiKey, type, modelId, apiType = "chat", headers: customHeaders = {} } = body;
+    const { baseUrl, type, modelId, apiType = "chat", headers: customHeaders = {} } = body;
+    const apiKey = typeof body.apiKey === "string" ? body.apiKey.trim() : body.apiKey;
 
     if (!baseUrl) {
       return res.status(400).json({ error: "Base URL is required" });
@@ -224,7 +243,7 @@ export async function POST_handler(req, res) {
     }
 
     if (isAuthFailure(modelsRes.status)) {
-      return res.json({ valid: false, error: "API key unauthorized" });
+      return res.json({ valid: false, error: authFailureMessage(await statusMessage(modelsRes), "API key unauthorized", apiKey) });
     }
 
     // Some gateways reject GET /models with 405 (method not allowed) even
@@ -263,7 +282,7 @@ export async function POST_handler(req, res) {
       }
       const chatError = await statusMessage(chatRes);
       if (isAuthFailure(chatRes.status)) {
-        return res.json({ valid: false, error: "API key unauthorized", method: "chat" });
+        return res.json({ valid: false, error: authFailureMessage(chatError, "API key unauthorized", apiKey), method: "chat" });
       }
       return res.json({
         valid: false,

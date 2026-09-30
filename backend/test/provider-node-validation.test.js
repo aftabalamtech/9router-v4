@@ -116,7 +116,7 @@ describe("provider node validation: non-JSON upstream bodies", () => {
 });
 
 describe("provider node validation: error categories stay distinct", () => {
-  it("reports 401 and 403 as an unauthorized key, not a parser error", async () => {
+  it("reports 401 and 403 as an unauthorized key with the upstream reason", async () => {
     for (const status of [401, 403]) {
       const out = await validate({
         status,
@@ -124,8 +124,38 @@ describe("provider node validation: error categories stay distinct", () => {
         payload: openAiNode(),
       });
       assert.equal(out.body.valid, false);
-      assert.equal(out.body.error, "API key unauthorized");
+      assert.match(out.body.error, /API key unauthorized/);
+      assert.match(out.body.error, /Invalid or revoked API key/);
     }
+  });
+
+  it("distinguishes a missing key from a rejected key", async () => {
+    const out = await validate({
+      status: 401,
+      body: JSON.stringify({ error: { message: "Missing API key. Send it as a Bearer token or x-api-key header." } }),
+      payload: openAiNode({ apiKey: "" }),
+    });
+    assert.match(out.body.error, /Missing API key/);
+  });
+
+  it("never echoes the submitted key in an auth error", async () => {
+    const secret = "cc_super_secret_value_1234";
+    const out = await validate({
+      status: 401,
+      body: JSON.stringify({ error: { message: `Invalid key ${secret}` } }),
+      payload: openAiNode({ apiKey: secret }),
+    });
+    assert.equal(out.body.error.includes(secret), false, "upstream key echo must not reach the client");
+  });
+
+  it("trims a key pasted with surrounding whitespace", async () => {
+    const out = await validate({
+      status: 200,
+      body: JSON.stringify({ data: [{ id: "claude-opus-5.5" }] }),
+      payload: openAiNode({ apiKey: "  cc_pasted_key\n" }),
+    });
+    assert.equal(out.calls[0].options.headers.Authorization, "Bearer cc_pasted_key");
+    assert.equal(out.body.valid, true);
   });
 
   it("reports 429 as a rate limit", async () => {
