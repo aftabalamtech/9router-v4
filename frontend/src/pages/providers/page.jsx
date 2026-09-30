@@ -25,6 +25,7 @@ import { getErrorCode, getRelativeTime } from "@/shared/utils";
 import { useNotificationStore } from "@/store/notificationStore";
 import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
 import { getProviderDisplayName } from "@/shared/utils/providerNaming";
+import { parseCurlImport, maskCurlSecrets } from "@/shared/utils/curlImport";
 import useConnectionEvents from "@/shared/hooks/useConnectionEvents";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import ModelAvailabilityBadge from "./components/ModelAvailabilityBadge";
@@ -910,6 +911,10 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
   const [createdNode, setCreatedNode] = useState(null);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState(null);
+  const [showCurlImport, setShowCurlImport] = useState(false);
+  const [curlCommand, setCurlCommand] = useState("");
+  const [curlWarnings, setCurlWarnings] = useState([]);
+  const [curlError, setCurlError] = useState("");
 
   const apiTypeOptions = [
     { value: "chat", label: "Chat Completions" },
@@ -929,11 +934,6 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
     }));
     if (formError) setFormError(null);
   };
-
-  useEffect(() => {
-    const defaultBaseUrl = "https://api.openai.com/v1";
-    setFormData((prev) => ({ ...prev, baseUrl: defaultBaseUrl }));
-  }, [formData.apiType]);
 
   const validateForm = () => {
     const errors = {};
@@ -1085,6 +1085,35 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
     }
   };
 
+  const handleParseCurl = () => {
+    try {
+      const parsed = parseCurlImport(curlCommand);
+      if (parsed.hasCredentials) setCurlCommand(maskCurlSecrets(curlCommand));
+      const endpoint = parsed.endpoint ? `Detected /${parsed.endpoint}; endpoint path removed from Base URL.` : "No standard chat endpoint suffix detected; review Base URL.";
+      setFormData((prev) => ({
+        ...prev,
+        baseUrl: parsed.baseUrl,
+        apiType: parsed.apiType,
+        name: prev.name || (() => { try { return new URL(parsed.baseUrl).hostname.split(".")[0]; } catch { return prev.name; } })(),
+        prefix: prev.prefix || (() => { try { return new URL(parsed.baseUrl).hostname.split(".")[0].toLowerCase().replace(/[^a-z0-9-]+/g, "-"); } catch { return prev.prefix; } })(),
+      }));
+      if (parsed.apiKey) setApiKey(parsed.apiKey);
+      if (parsed.modelId) setCheckModelId(parsed.modelId);
+      if (parsed.apiType === "responses") setShowAdvanced(true);
+      setCurlWarnings([
+        endpoint,
+        ...(parsed.hasCredentials ? ["Authorization credential detected and placed in API Key field. Review it before saving."] : []),
+        ...(parsed.customHeaderNames.length ? [`Custom headers detected but not applied to current provider schema: ${parsed.customHeaderNames.join(", ")}`] : []),
+        ...parsed.unsupported,
+        ...(parsed.method !== "POST" ? [`Command method is ${parsed.method}; provider validation uses POST.`] : []),
+      ]);
+      setCurlError("");
+    } catch (error) {
+      setCurlWarnings([]);
+      setCurlError(error.message || "Could not parse cURL command.");
+    }
+  };
+
   // Helper to render validation result
   const renderValidationResult = () => {
     if (!validationResult) return null;
@@ -1115,6 +1144,21 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
       <div className="flex flex-col gap-4">
         {!createdNode ? (
           <>
+            <div className="flex flex-col gap-2 rounded-lg border border-border p-3">
+              <Button variant="secondary" onClick={() => setShowCurlImport((open) => !open)}>
+                {showCurlImport ? "Close cURL Import" : "Import from cURL"}
+              </Button>
+              {showCurlImport && (
+                <>
+                  <label className="text-sm text-text-muted" htmlFor="provider-curl-import">Paste request command</label>
+                  <textarea id="provider-curl-import" value={curlCommand} onChange={(event) => setCurlCommand(event.target.value)} rows={5} spellCheck={false} className="w-full rounded-lg border border-border bg-background p-3 font-mono text-xs" placeholder={'curl https://api.example.com/v1/chat/completions \\\n  -H "Authorization: Bearer YOUR_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d \'{"model":"my-model","messages":[]}\''} />
+                  <p className="text-xs text-text-muted">Parsed locally only. Command is never executed or uploaded. Import only prefills form; review all values.</p>
+                  <Button variant="secondary" onClick={handleParseCurl} disabled={!curlCommand.trim()}>Parse cURL</Button>
+                  {curlError && <p className="text-sm text-red-500">{curlError}</p>}
+                  {curlWarnings.length > 0 && <ul className="list-disc pl-5 text-xs text-text-muted">{curlWarnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul>}
+                </>
+              )}
+            </div>
             <Input
               label="Provider Name"
               value={formData.name}

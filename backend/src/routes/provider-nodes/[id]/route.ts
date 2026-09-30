@@ -1,5 +1,5 @@
 
-import { deleteProviderConnectionsByProvider, deleteProviderNode, getProviderConnections, getProviderNodeById, updateProviderConnection, updateProviderNode } from "../../../models/index.js";
+import { deleteProviderConnectionsByProvider, deleteProviderNode, getProviderConnections, getProviderNodeById, getProviderNodes, updateProviderConnection, updateProviderNode } from "../../../models/index.js";
 import { normalizeCompatibleBaseUrl } from "../../../lib/net/compatibleUrl.js";
 
 // PUT /api/provider-nodes/[id] - Update provider node
@@ -18,9 +18,11 @@ export async function PUT_handler(req, res, { params }) {
       return res.status(400).json({ error: "Name is required" });
     }
 
-    if (!prefix?.trim()) {
-      return res.status(400).json({ error: "Prefix is required" });
+    if (typeof prefix !== "string" || !/^[a-z0-9][a-z0-9-]{0,39}$/i.test(prefix.trim())) {
+      return res.status(400).json({ error: "Prefix must use only letters, numbers, and dashes (maximum 40 characters)" });
     }
+    const duplicatePrefix = (await getProviderNodes()).some((candidate) => candidate.id !== id && String(candidate.prefix || "").toLowerCase() === prefix.trim().toLowerCase());
+    if (duplicatePrefix) return res.status(409).json({ error: "Provider prefix is already in use" });
 
     // Only validate apiType for OpenAI Compatible nodes
     if (node.type === "openai-compatible" && (!apiType || !["chat", "responses"].includes(apiType))) {

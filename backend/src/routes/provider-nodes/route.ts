@@ -34,6 +34,15 @@ function sanitizeBaseUrl(raw: string | undefined | null, fallback: string): stri
   return normalizeCompatibleBaseUrl(candidate) || fallback;
 }
 
+function validPrefix(prefix: unknown): prefix is string {
+  return typeof prefix === "string" && /^[a-z0-9][a-z0-9-]{0,39}$/i.test(prefix.trim());
+}
+
+async function prefixTaken(prefix: string): Promise<boolean> {
+  const nodes = await getProviderNodes();
+  return nodes.some((node) => String(node.prefix || "").toLowerCase() === prefix.trim().toLowerCase());
+}
+
 // GET /api/provider-nodes - List all provider nodes
 export async function GET(req, res) {
   try {
@@ -55,9 +64,10 @@ export async function POST_handler(req, res) {
       return res.status(400).json({ error: "Name is required" });
     }
 
-    if (!prefix?.trim()) {
-      return res.status(400).json({ error: "Prefix is required" });
+    if (!validPrefix(prefix)) {
+      return res.status(400).json({ error: "Prefix must use only letters, numbers, and dashes (maximum 40 characters)" });
     }
+    if (await prefixTaken(prefix)) return res.status(409).json({ error: "Provider prefix is already in use" });
 
     // Determine type
     const nodeType = type || "openai-compatible";
