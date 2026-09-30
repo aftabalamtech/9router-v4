@@ -33,12 +33,17 @@ before(async () => {
 });
 
 /** Invoke the route with a scripted fetch; returns { body, statusCode, calls }. */
-async function validate({ status, body = "{}", contentType = "application/json", request, payload }) {
+async function validate({ status, body = "{}", contentType = "application/json", headers = {}, finalUrl = "", redirected = false, payload }) {
   const realFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url: String(url), options });
-    return new Response(body, { status, headers: { "content-type": contentType } });
+    const res = new Response(body, { status, headers: { "content-type": contentType, ...headers } });
+    // Response.url / Response.redirected are read-only — override only when
+    // a test scripts a redirect chain.
+    if (finalUrl) Object.defineProperty(res, "url", { value: finalUrl });
+    if (redirected) Object.defineProperty(res, "redirected", { value: true });
+    return res;
   };
   try {
     const res = {
@@ -166,6 +171,7 @@ describe("provider node validation: error categories stay distinct", () => {
     });
     assert.equal(out.body.valid, false);
     assert.match(out.body.error, /429|Rate limit/i);
+    assert.equal(out.body.category, "rate_limited");
   });
 
   it("reports 5xx as an upstream server error", async () => {
@@ -183,11 +189,89 @@ describe("provider node validation: error categories stay distinct", () => {
     const out = await validate({
       status: 404,
       body: JSON.stringify({ error: "not found" }),
-      request: "models",
       payload: openAiNode({ modelId: "claude-opus-5.5" }),
     });
     assert.equal(out.body.valid, false, "the mocked 404 models response is not a chat answer");
     assert.equal(out.calls[0].url, "https://codecraftapi.com/v1/models");
+  });
+
+  it("never reports an HTML 403 as an invalid API key", async () => {
+    const out = await validate({
+      status: 403,
+      body: HTML_BODY,
+      contentType: "text/html; charset=utf-8",
+      payload: openAiNode(),
+    });
+    assert.equal(out.body.valid, false);
+    assert.equal(out.body.category, "html_response");
+    assert.equal(out.body.error.includes("API key unauthorized"), false, "HTML must not be labeled a key failure");
+    assert.match(out.body.error, /HTML instead of API JSON/);
+  });
+
+  it("classifies a Cloudflare challenge page as a security challenge", async () => {
+    const challenge = "<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>Checking your browser before you access codecraftapi.com. cloudflare ray id</body></html>";
+    const out = await validate({
+      status: 403,
+      body: challenge,
+      contentType: "text/html",
+      headers: { server: "cloudflare", "cf-ray": "abc123-XYZ" },
+      finalUrl: "https://codecraftapi.com/v1/models",
+      payload: openAiNode(),
+    });
+    assert.equal(out.body.valid, false);
+    assert.equal(out.body.category, "security_challenge");
+    assert.match(out.body.error, /security challenge|will not bypass/i);
+    assert.equal(out.body.diagnostics.headers["cf-ray"], "abc123-XYZ");
+    assert.equal(out.body.diagnostics.finalUrl, "https://codecraftapi.com/v1/models");
+    // The markup-free preview must not contain raw HTML.
+    assert.equal(out.body.diagnostics.preview.includes("<"), false);
+  });
+
+  it("reports a non-key 403 as denied access, not an invalid key", async () => {
+    const out = await validate({
+      status: 403,
+      body: JSON.stringify({ error: { message: "Forbidden: requests from this network are blocked." } }),
+      payload: openAiNode(),
+    });
+    assert.equal(out.body.valid, false);
+    assert.equal(out.body.category, "access_denied");
+    assert.equal(out.body.error.includes("API key unauthorized"), false);
+    assert.match(out.body.error, /denied access/i);
+  });
+
+  it("keeps a 403 that describes the key as a credential failure", async () => {
+    const out = await validate({
+      status: 403,
+      body: JSON.stringify({ error: { message: "Invalid API key for this project." } }),
+      payload: openAiNode(),
+    });
+    assert.equal(out.body.category, "access_denied");
+    assert.match(out.body.error, /API key unauthorized/);
+    assert.match(out.body.error, /Invalid API key/);
+  });
+
+  it("exposes sanitized request metadata without the secret", async () => {
+    const secret = "cc_metadata_secret_9999";
+    const out = await validate({
+      status: 401,
+      body: JSON.stringify({ error: { message: "Invalid or revoked API key." } }),
+      payload: openAiNode({ apiKey: secret }),
+    });
+    assert.deepEqual(out.body.diagnostics.request, {
+      method: "GET",
+      url: "https://codecraftapi.com/v1/models",
+      auth: "bearer",
+    });
+    assert.equal(JSON.stringify(out.body).includes(secret), false, "no response field may carry the key");
+  });
+
+  it("reports an unauthenticated request as auth:none", async () => {
+    const out = await validate({
+      status: 401,
+      body: JSON.stringify({ error: { message: "Missing API key." } }),
+      payload: openAiNode({ apiKey: "" }),
+    });
+    assert.equal(out.body.diagnostics.request.auth, "none");
   });
 });
 

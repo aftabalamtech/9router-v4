@@ -1111,7 +1111,7 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
   // Helper to render validation result
   const renderValidationResult = () => {
     if (!validationResult) return null;
-    const { valid, error, method } = validationResult;
+    const { valid, error, method, category, status, diagnostics } = validationResult;
 
     if (valid) {
       return (
@@ -1129,6 +1129,14 @@ function AddOpenAICompatibleModal({ isOpen, onClose, onCreated }) {
       <div className="flex flex-col gap-1">
         <Badge variant="error">Invalid</Badge>
         {error && <span className="text-sm text-red-500">{error}</span>}
+        {category && (
+          <span className="text-xs text-text-muted">
+            Category: {category}{typeof status === "number" ? ` (HTTP ${status})` : ""}
+          </span>
+        )}
+        {diagnostics?.finalUrl && (
+          <span className="text-xs text-text-muted">Upstream: {diagnostics.finalUrl}</span>
+        )}
       </div>
     );
   };
@@ -1400,7 +1408,7 @@ function AddAnthropicCompatibleModal({ isOpen, onClose, onCreated }) {
   // Helper to render validation result
   const renderValidationResult = () => {
     if (!validationResult) return null;
-    const { valid, error, method } = validationResult;
+    const { valid, error, method, category, status, diagnostics } = validationResult;
 
     if (valid) {
       return (
@@ -1418,6 +1426,14 @@ function AddAnthropicCompatibleModal({ isOpen, onClose, onCreated }) {
       <div className="flex flex-col gap-1">
         <Badge variant="error">Invalid</Badge>
         {error && <span className="text-sm text-red-500">{error}</span>}
+        {category && (
+          <span className="text-xs text-text-muted">
+            Category: {category}{typeof status === "number" ? ` (HTTP ${status})` : ""}
+          </span>
+        )}
+        {diagnostics?.finalUrl && (
+          <span className="text-xs text-text-muted">Upstream: {diagnostics.finalUrl}</span>
+        )}
       </div>
     );
   };

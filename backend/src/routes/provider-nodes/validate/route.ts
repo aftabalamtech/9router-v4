@@ -39,13 +39,93 @@ const getChatErrorMessage = (status) => {
 
 const isAuthFailure = (status) => status === 401 || status === 403;
 
+function classifyUpstreamFailure(status, contentType, bodyText, diagnosticHeaders = {}) {
+  const text = String(bodyText || "").trim();
+  const headerText = [diagnosticHeaders?.server, diagnosticHeaders?.["cf-ray"], diagnosticHeaders?.["cf-mitigated"], diagnosticHeaders?.via]
+    .filter(Boolean)
+    .join(" ");
+  const haystack = `${text} ${headerText}`;
+  const isHtml = /text\/html|application\/xhtml\+xml/i.test(contentType || "") || /^\s*(<!doctype\s+html|<html[\s>])/i.test(text);
+  if (isHtml) {
+    if (/cloudflare|cf-ray|attention required|checking your browser|just a moment/i.test(haystack)) return "security_challenge";
+    return "html_response";
+  }
+  if (status === 401) return "invalid_credentials";
+  if (status === 403) return "access_denied";
+  if (status === 404) return "wrong_endpoint";
+  if (status === 429) return "rate_limited";
+  if (status >= 500) return "upstream_server_error";
+  return "upstream_http_error";
+}
+
+async function upstreamDiagnostics(response, url, request = null) {
+  const parsed = await readResponseOnce(response);
+  const headers = response.headers;
+  const diagnosticHeaders = {};
+  for (const name of ["server", "cf-ray", "cf-mitigated", "via", "x-cache", "location", "content-type", "x-request-id"]) {
+    const value = headers?.get?.(name);
+    if (value) diagnosticHeaders[name] = value.slice(0, 200);
+  }
+  // Keep a tiny markup-free preview. Never include arbitrary HTML in a response
+  // or logs; it may contain scripts, tokens, cookies, or reflected input.
+  const preview = parsed.text
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, " ")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+  return {
+    status: response.status,
+    contentType: parsed.contentType,
+    finalUrl: response.url || url,
+    redirected: Boolean(response.redirected),
+    // Sanitized request metadata only: method, normalized URL, auth-scheme
+    // presence. Never the key, headers, or body. Lets two deployments
+    // (e.g. Railway vs Render) be compared without leaking credentials.
+    request,
+    category: classifyUpstreamFailure(response.status, parsed.contentType, parsed.text, diagnosticHeaders),
+    headers: diagnosticHeaders,
+    preview,
+    parsed,
+  };
+}
+
+function publicDiagnostics(d) {
+  return {
+    contentType: d.contentType,
+    finalUrl: d.finalUrl,
+    redirected: d.redirected,
+    request: d.request,
+    headers: d.headers,
+    preview: d.preview,
+  };
+}
+
+function diagnosticError(d, apiKey) {
+  const detail = parseErrorPayload(d.parsed.text, { status: d.status });
+  if (d.category === "security_challenge") return `Upstream security challenge or access filter (HTTP ${d.status}); 9Router will not bypass it.`;
+  if (d.category === "html_response") return `Upstream returned HTML instead of API JSON (HTTP ${d.status}); check base URL and upstream/proxy routing.`;
+  // A non-HTML 403 whose body actually describes the key is still a credential
+  // problem; a 403 with any other body (or HTML, handled above) must not be
+  // reported as an invalid key.
+  if (d.category === "access_denied") {
+    if (/api[\s_-]?key|unauthori[sz]ed|authentication/i.test(detail)) return authFailureMessage(detail, "API key unauthorized", apiKey);
+    return `Upstream denied access (HTTP ${d.status}); this does not prove the API key is invalid.`;
+  }
+  if (d.category === "invalid_credentials") return authFailureMessage(detail, "API key unauthorized", apiKey);
+  if (d.category === "wrong_endpoint") return `Upstream endpoint not found (HTTP ${d.status}); check configured API base URL.`;
+  if (d.category === "rate_limited") return `Upstream rate limited the request (HTTP ${d.status}).`;
+  if (d.category === "upstream_server_error") return `Upstream server failed (HTTP ${d.status}).`;
+  return `Upstream request failed (HTTP ${d.status}).`;
+}
+
 const trimBaseUrl = normalizeCompatibleBaseUrl;
 
 function authHeaders(apiKey, extra = {}) {
   const headers = { ...extra };
-  // A key pasted from a shell/editor commonly carries a trailing newline or
-  // space. Sending it verbatim yields `Bearer cc_xxx\n`, which upstreams reject
-  // as an invalid key — the exact "valid key, still unauthorized" report.
+  // Defensive trim: HTTP drops trailing whitespace in header values, so this
+  // is hygiene for keys pasted with stray whitespace, not an auth fix.
   const key = typeof apiKey === "string" ? apiKey.trim() : apiKey;
   const authKey = Object.keys(headers).find((k) => k.toLowerCase() === "authorization");
   if (authKey) {
@@ -242,14 +322,27 @@ export async function POST_handler(req, res) {
       return res.json({ valid: true, method: "models", models });
     }
 
+    // The `modelsRes.ok` branch above already returned, so this diagnostic is
+    // always for a non-2xx response. Read the body exactly once here and reuse
+    // it below — never call statusMessage()/readResponseOnce() again on it.
+    const modelsRequest = { method: "GET", url: modelsUrl, auth: apiKey ? "bearer" : "none" };
+    const modelsDiagnostic = await upstreamDiagnostics(modelsRes, modelsUrl, modelsRequest);
+
     if (isAuthFailure(modelsRes.status)) {
-      return res.json({ valid: false, error: authFailureMessage(await statusMessage(modelsRes), "API key unauthorized", apiKey) });
+      return res.json({ valid: false, status: modelsDiagnostic.status, category: modelsDiagnostic.category, error: diagnosticError(modelsDiagnostic, apiKey), diagnostics: publicDiagnostics(modelsDiagnostic) });
     }
 
     // Some gateways reject GET /models with 405 (method not allowed) even
     // though they serve chat — treat that as "reachable, no listing".
     if (modelsRes.status === 405) {
+      if (modelsDiagnostic.category === "html_response" || modelsDiagnostic.category === "security_challenge") {
+        return res.json({ valid: false, status: modelsDiagnostic.status, category: modelsDiagnostic.category, error: diagnosticError(modelsDiagnostic, apiKey), diagnostics: publicDiagnostics(modelsDiagnostic) });
+      }
       return res.json({ valid: true, method: "no-models", models: [], warning: "Upstream has no /models endpoint — add model IDs manually." });
+    }
+
+    if (modelsDiagnostic.category === "html_response" || modelsDiagnostic.category === "security_challenge") {
+      return res.json({ valid: false, status: modelsDiagnostic.status, category: modelsDiagnostic.category, error: diagnosticError(modelsDiagnostic, apiKey), diagnostics: publicDiagnostics(modelsDiagnostic) });
     }
 
     // Fallback: try chat/completions if modelId provided
@@ -280,19 +373,34 @@ export async function POST_handler(req, res) {
           error: `Upstream returned ${nonJsonReason || "a body that is not an OpenAI-compatible response"} (HTTP ${chatRes.status}). Check the base URL and API type.`,
         });
       }
-      const chatError = await statusMessage(chatRes);
+      const chatRequest = { method: "POST", url: chatUrl, auth: apiKey ? "bearer" : "none" };
+      const chatDiagnostic = await upstreamDiagnostics(chatRes, chatUrl, chatRequest);
+      const chatError = diagnosticError(chatDiagnostic, apiKey);
       if (isAuthFailure(chatRes.status)) {
-        return res.json({ valid: false, error: authFailureMessage(chatError, "API key unauthorized", apiKey), method: "chat" });
+        return res.json({ valid: false, status: chatDiagnostic.status, category: chatDiagnostic.category, error: chatError, method: "chat", diagnostics: publicDiagnostics(chatDiagnostic) });
+      }
+      if (chatDiagnostic.category === "html_response" || chatDiagnostic.category === "security_challenge") {
+        return res.json({ valid: false, status: chatDiagnostic.status, category: chatDiagnostic.category, error: chatError, method: "chat", diagnostics: publicDiagnostics(chatDiagnostic) });
       }
       return res.json({
         valid: false,
         status: chatRes.status,
+        category: chatDiagnostic.category,
         error: chatError || getChatErrorMessage(chatRes.status),
+        diagnostics: publicDiagnostics(chatDiagnostic),
         method: apiType === "responses" ? "responses" : "chat"
       });
     }
 
-    return res.json({ valid: false, error: getModelsErrorMessage(modelsRes.status) });
+    // No chat fallback (no modelId): report the /models outcome with its
+    // category and sanitized upstream diagnostics instead of a bare message.
+    return res.json({
+      valid: false,
+      status: modelsDiagnostic.status,
+      category: modelsDiagnostic.category,
+      error: diagnosticError(modelsDiagnostic, apiKey),
+      diagnostics: publicDiagnostics(modelsDiagnostic),
+    });
   } catch (error) {
     const errorMessage = getErrorMessage(error);
     console.error("Error validating provider node:", {

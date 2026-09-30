@@ -156,6 +156,14 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
             {!validationResult.valid && validationResult.error && (
               <span className="text-sm text-red-500">{validationResult.error}</span>
             )}
+            {!validationResult.valid && validationResult.category && (
+              <span className="text-xs text-text-muted">
+                Category: {validationResult.category}{typeof validationResult.status === "number" ? ` (HTTP ${validationResult.status})` : ""}
+              </span>
+            )}
+            {!validationResult.valid && validationResult.diagnostics?.finalUrl && (
+              <span className="text-xs text-text-muted">Upstream: {validationResult.diagnostics.finalUrl}</span>
+            )}
           </div>
         )}
         <div className="flex gap-2">
