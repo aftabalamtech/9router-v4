@@ -3,6 +3,7 @@ import { useState, useEffect } from "react";
 import PropTypes from "prop-types";
 import { Button, Badge, Input, Modal, Select } from "@/shared/components";
 import { fetchValidationResult } from "@/shared/utils/safeJson";
+import ProviderDiagnostics from "@/pages/providers/components/ProviderDiagnostics";
 
 const VALIDATION_TIMEOUT_MS = 15000;
 
@@ -148,6 +149,16 @@ export default function EditCompatibleNodeModal({ isOpen, node, onSave, onClose,
           placeholder="e.g. my-model-id"
           hint="If provider lacks /models endpoint, enter a model ID to validate via chat/completions instead."
         />
+        {validationResult && !validationResult.valid && (
+          <ProviderDiagnostics
+            providerId={node?.id}
+            baseUrl={formData.baseUrl}
+            apiKey={checkKey}
+            apiType={formData.apiType}
+            modelId={checkModelId.trim()}
+          />
+        )}
+
         {validationResult && (
           <div className="flex flex-col gap-1">
             <Badge variant={validationResult.valid ? "success" : "error"}>

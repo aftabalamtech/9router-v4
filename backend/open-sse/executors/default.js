@@ -3,6 +3,11 @@ import { PROVIDERS } from "../config/providers.js";
 import { OAUTH_ENDPOINTS, buildKimiHeaders } from "../config/appConstants.js";
 import { buildClineHeaders } from "../../src/shared/utils/clineAuth.js";
 import { buildCompatibleChatUrl, buildCompatibleEmbeddingsUrl } from "../../src/lib/net/compatibleUrl.js";
+// Single source of truth for compatible-provider endpoint construction and auth
+// headers. Validation, the dashboard, and this runtime executor must agree on
+// the URL they build — divergence here is what made a provider validate in one
+// place and fail in another.
+import { describeProviderTarget, authHeadersFor, compatibleFamily } from "../../src/lib/net/providerConnection.js";
 import { getCachedClaudeHeaders } from "../utils/claudeHeaderCache.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
@@ -118,29 +123,27 @@ export class DefaultExecutor extends BaseExecutor {
   }
 
   buildUrl(model, stream, urlIndex = 0, credentials = null) {
-    // Custom providers share one URL builder (lib/net/compatibleUrl.js). It
-    // strips a pasted `/chat/completions` / `/models` / `/messages` suffix, so
-    // a user who stores the full endpoint no longer gets a doubled path like
+    // Custom providers share one URL builder (lib/net/providerConnection.js).
+    // It strips a pasted `/chat/completions` / `/models` / `/messages` suffix,
+    // so a user who stores the full endpoint no longer gets a doubled path like
     // `.../v1/chat/completions/chat/completions`. It also never appends `/v1`
     // (self-hosted gateways legitimately live at the root).
-    if (this.provider?.startsWith?.("openai-compatible-")) {
-      return (
-        buildCompatibleChatUrl(
-          credentials?.providerSpecificData?.baseUrl,
-          this.provider
-        ) || "https://api.openai.com/v1/chat/completions"
-      );
-    }
-    if (this.provider?.startsWith?.("anthropic-compatible-")) {
-      return (
-        buildCompatibleChatUrl(
-          credentials?.providerSpecificData?.baseUrl,
-          this.provider
-        ) || "https://api.anthropic.com/v1/messages"
-      );
-    }
-    if (this.provider?.startsWith?.("custom-embedding-")) {
-      return buildCompatibleEmbeddingsUrl(credentials?.providerSpecificData?.baseUrl);
+    //
+    // Same helper the diagnostics endpoint uses, so a URL that validates is the
+    // URL that gets called.
+    const family = compatibleFamily(this.provider);
+    if (family) {
+      const target = describeProviderTarget({
+        providerId: this.provider,
+        baseUrl: credentials?.providerSpecificData?.baseUrl,
+        apiKey: credentials?.apiKey || credentials?.accessToken,
+      });
+      if (family === "embedding") return target.urls.embeddings || "";
+      if (target.urls.chat) return target.urls.chat;
+      // Fall through to the historical defaults when no base URL is configured.
+      if (family === "anthropic") return "https://api.anthropic.com/v1/messages";
+      if (target.apiType === "responses") return "https://api.openai.com/v1/responses";
+      return "https://api.openai.com/v1/chat/completions";
     }
     switch (this.provider) {
       case "claude":

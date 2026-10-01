@@ -46,6 +46,9 @@ const PROTECTED_API_PATHS = [
   "/api/keys",
   "/api/providers",
   "/api/provider-nodes",
+  // Diagnostics performs outbound requests using a submitted credential, so it
+  // must sit behind the same session gate as the provider CRUD routes.
+  "/api/provider-diagnostics",
   "/api/proxy-pools",
   "/api/combos",
   "/api/models",

@@ -1,5 +1,6 @@
 
 import { createProxyPool, getProviderConnections, getProxyPools } from "../../models/index.js";
+import { validateProxyEndpoint } from "../../lib/net/egressPolicy.js";
 
 function toBoolean(value) {
   if (value === "true") return true;
@@ -23,6 +24,19 @@ function normalizeProxyPoolInput(body = {}) {
 
   if (!proxyUrl) {
     return { error: "Proxy URL is required" };
+  }
+
+  // Relay types carry their own deployment (the Worker fetches an
+  // `x-relay-target` header), so the destination rules differ.
+  if (type === "http") {
+    const check = validateProxyEndpoint(proxyUrl);
+    if (!check.ok) {
+      // Reject rather than normalize: an unvalidated proxy destination turns
+      // 9Router into a request-forgery primitive against whatever the service
+      // can already reach.
+      return { error: `Invalid proxy URL: ${check.reason}` };
+    }
+    return { name, proxyUrl: check.url.toString(), noProxy, isActive, strictProxy, type };
   }
 
   return { name, proxyUrl, noProxy, isActive, strictProxy, type };
