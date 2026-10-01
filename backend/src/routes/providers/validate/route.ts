@@ -9,9 +9,27 @@ import { normalizeProviderId } from "../../../lib/providerNormalization.js";
 import { fetchWithTimeout } from "../../../lib/net/fetchWithTimeout.js";
 import { buildCompatibleChatUrl, buildCompatibleModelsUrl, buildCompatibleEmbeddingsUrl } from "../../../lib/net/compatibleUrl.js";
 import { parseErrorPayload, readResponseOnce } from "../../../lib/net/httpBody.js";
+import { readUpstreamDiagnostic, publicUpstreamDiagnostics, describeUpstreamFailure } from "../../../lib/net/upstreamDiagnostics.js";
 
 function isAuthFailure(status) {
   return status === 401 || status === 403;
+}
+
+/**
+ * Single place where a failed provider probe becomes a user-facing verdict.
+ *
+ * Previously each branch returned the literal string "Invalid API key" for any
+ * 401/403, which mislabelled Cloudflare challenge pages, IP blocks and wrong
+ * endpoints as credential failures. Now the body decides the category.
+ */
+function verdictFromDiagnostic(d, apiKey, noun) {
+  return {
+    valid: false,
+    error: describeUpstreamFailure(d, { apiKey, noun }),
+    status: d.status,
+    category: d.category,
+    diagnostics: publicUpstreamDiagnostics(d),
+  };
 }
 
 function sanitizeUpstreamDetail(value) {
@@ -158,16 +176,16 @@ export async function POST_handler(req, res) {
           }
           return res.json({ valid: false, error: "Upstream /models returned malformed data; verify configured endpoint and response format" });
         }
-        if (isAuthFailure(modelsRes.status)) {
-          await readResponseOnce(modelsRes);
-          return res.json({ valid: false, error: "Invalid API key" });
+        const modelsDiag = await readUpstreamDiagnostic(modelsRes, { url: modelsUrl, method: "GET", hasAuth: !!apiKey, apiKey });
+        // A 404/405 means "no model list here", not a bad key: fall through to
+        // the chat probe. Every other failure is reported with its real category.
+        if (![404, 405].includes(modelsRes.status)) {
+          return res.json(verdictFromDiagnostic(modelsDiag, apiKey, "Upstream /models"));
         }
-        const modelsError = await upstreamFailure(modelsRes);
-        // A missing or unsupported model-list route is not evidence of invalid credentials.
-        if (![404, 405].includes(modelsRes.status)) return res.json({ valid: false, error: modelsError });
 
         const model = body.defaultModel || body.modelId || providerSpecificData?.defaultModel || "test";
-        const chatRes = await fetchWithTimeout(buildCompatibleChatUrl(node.baseUrl, provider), {
+        const chatUrl = buildCompatibleChatUrl(node.baseUrl, provider);
+        const chatRes = await fetchWithTimeout(chatUrl, {
           method: "POST",
           headers: {
             ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}),
@@ -180,12 +198,9 @@ export async function POST_handler(req, res) {
             messages: [{ role: "user", content: "ping" }],
           }),
         });
-        isValid = chatRes.ok;
-        const chatError = isValid ? "" : await upstreamFailure(chatRes);
-        return res.json({
-          valid: isValid,
-          error: isValid ? null : chatError,
-        });
+        if (chatRes.ok) return res.json({ valid: true, error: null });
+        const chatDiag = await readUpstreamDiagnostic(chatRes, { url: chatUrl, method: "POST", hasAuth: !!apiKey, apiKey });
+        return res.json(verdictFromDiagnostic(chatDiag, apiKey, "Upstream chat endpoint"));
       }
 
       // Custom Embedding nodes: probe /models (most embedding APIs are OpenAI-compatible)
@@ -204,25 +219,20 @@ export async function POST_handler(req, res) {
           if (parsed.json && (Array.isArray(parsed.json) || Array.isArray(parsed.json.data) || Array.isArray(parsed.json.models) || Array.isArray(parsed.json.results))) return res.json({ valid: true });
           return res.json({ valid: false, error: "Upstream /models returned malformed data; verify configured endpoint and response format" });
         }
-        // Auth errors are definitive
-        if (modelsRes.status === 401 || modelsRes.status === 403) {
-          await readResponseOnce(modelsRes);
-          return res.json({ valid: false, error: "Invalid API key" });
+        const modelsDiag = await readUpstreamDiagnostic(modelsRes, { url: modelsUrl, method: "GET", hasAuth: !!apiKey, apiKey });
+        if (![404, 405].includes(modelsRes.status)) {
+          return res.json(verdictFromDiagnostic(modelsDiag, apiKey, "Upstream /models"));
         }
-        const modelsError = await upstreamFailure(modelsRes);
-        if (![404, 405].includes(modelsRes.status)) return res.json({ valid: false, error: modelsError });
         // Fallback: probe /embeddings with a common test model — many providers lack /models
-        const embedRes = await fetchWithTimeout(buildCompatibleEmbeddingsUrl(node.baseUrl), {
+        const embedUrl = buildCompatibleEmbeddingsUrl(node.baseUrl);
+        const embedRes = await fetchWithTimeout(embedUrl, {
           method: "POST",
           headers: { ...(apiKey ? { "Authorization": `Bearer ${apiKey}` } : {}), "Content-Type": "application/json" },
           body: JSON.stringify({ model: "test", input: "ping" }),
         });
-        isValid = embedRes.ok;
-        const embedError = isValid ? "" : await upstreamFailure(embedRes);
-        return res.json({
-          valid: isValid,
-          error: isValid ? null : embedError,
-        });
+        if (embedRes.ok) return res.json({ valid: true });
+        const embedDiag = await readUpstreamDiagnostic(embedRes, { url: embedUrl, method: "POST", hasAuth: !!apiKey, apiKey });
+        return res.json(verdictFromDiagnostic(embedDiag, apiKey, "Upstream embeddings endpoint"));
       }
 
       if (isAnthropicCompatibleProvider(provider)) {
@@ -247,15 +257,14 @@ export async function POST_handler(req, res) {
           if (parsed.json && (Array.isArray(parsed.json) || Array.isArray(parsed.json.data) || Array.isArray(parsed.json.models) || Array.isArray(parsed.json.results))) return res.json({ valid: true, error: null });
           return res.json({ valid: false, error: "Upstream /models returned malformed data; verify configured endpoint and response format" });
         }
-        if (isAuthFailure(modelsRes.status)) {
-          await readResponseOnce(modelsRes);
-          return res.json({ valid: false, error: "Invalid API key" });
+        const modelsDiag = await readUpstreamDiagnostic(modelsRes, { url: modelsUrl, method: "GET", hasAuth: !!apiKey, apiKey });
+        if (![404, 405].includes(modelsRes.status)) {
+          return res.json(verdictFromDiagnostic(modelsDiag, apiKey, "Upstream /models"));
         }
-        const modelsError = await upstreamFailure(modelsRes);
-        if (![404, 405].includes(modelsRes.status)) return res.json({ valid: false, error: modelsError });
 
         const model = body.defaultModel || body.modelId || providerSpecificData?.defaultModel || "test";
-        const messagesRes = await fetchWithTimeout(buildCompatibleChatUrl(node.baseUrl, provider), {
+        const messagesUrl = buildCompatibleChatUrl(node.baseUrl, provider);
+        const messagesRes = await fetchWithTimeout(messagesUrl, {
           method: "POST",
           headers: {
             ...(apiKey ? { "x-api-key": apiKey } : {}),
@@ -269,12 +278,9 @@ export async function POST_handler(req, res) {
             messages: [{ role: "user", content: "ping" }],
           }),
         });
-        isValid = messagesRes.ok;
-        const messagesError = isValid ? "" : await upstreamFailure(messagesRes);
-        return res.json({
-          valid: isValid,
-          error: isValid ? null : messagesError,
-        });
+        if (messagesRes.ok) return res.json({ valid: true, error: null });
+        const messagesDiag = await readUpstreamDiagnostic(messagesRes, { url: messagesUrl, method: "POST", hasAuth: !!apiKey, apiKey });
+        return res.json(verdictFromDiagnostic(messagesDiag, apiKey, "Upstream messages endpoint"));
       }
 
       if (provider === "cloudflare-ai") {

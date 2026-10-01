@@ -7,6 +7,19 @@ import Button from "@/shared/components/Button";
 import Badge from "@/shared/components/Badge";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import Toggle from "@/shared/components/Toggle";
+import { readJsonResponse } from "@/shared/utils/safeJson";
+
+// Shared safe reader: never throws on a non-JSON body. Test Connection and the
+// API-key "Check" both used `await res.json()`, so whenever the backend replied
+// with an HTML page (Cloudflare interstitial, proxy error) the browser threw
+// `Unexpected token '<', "<!DOCTYPE "... is not valid JSON` and the real
+// failure category was lost.
+const postJson = async (url, body) =>
+  readJsonResponse(await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }), { label: "provider validation" });
 
 export default function EditConnectionModal({ isOpen, connection, proxyPools, onSave, onClose }) {
   const [formData, setFormData] = useState({
@@ -26,8 +39,10 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
+  const [testError, setTestError] = useState("");
   const [validating, setValidating] = useState(false);
   const [validationResult, setValidationResult] = useState(null);
+  const [validationError, setValidationError] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -53,7 +68,9 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
         setCloudflareData({ accountId: connection.providerSpecificData.accountId || "" });
       }
       setTestResult(null);
+      setTestError("");
       setValidationResult(null);
+      setValidationError("");
     }
   }, [connection]);
 
@@ -70,36 +87,51 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     if (!connection?.provider) return;
     setTesting(true);
     setTestResult(null);
+    setTestError("");
     try {
-      const res = await fetch(`/api/providers/${connection.id}/test`, { method: "POST" });
-      const data = await res.json();
-      setTestResult(data.valid ? "success" : "failed");
+      const parsed = await readJsonResponse(
+        await fetch(`/api/providers/${connection.id}/test`, { method: "POST" }),
+        { label: "connection test" }
+      );
+      const data = parsed.data || {};
+      if (parsed.ok && data.valid) {
+        setTestResult("success");
+      } else {
+        setTestResult("failed");
+        setTestError(data.error || parsed.error || "Connection test failed");
+      }
     } catch {
       setTestResult("failed");
+      setTestError("Could not reach the 9Router API");
     } finally {
       setTesting(false);
     }
+  };
+
+  const validateKey = async () => {
+    const parsed = await postJson("/api/providers/validate", {
+      provider: connection.provider,
+      apiKey: formData.apiKey,
+      ...(isAzure ? { providerSpecificData: azureData } : {}),
+      ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
+    });
+    const data = parsed.data || {};
+    const ok = parsed.ok && !!data.valid;
+    setValidationResult(ok ? "success" : "failed");
+    setValidationError(ok ? "" : (data.error || parsed.error || "Validation failed"));
+    return ok;
   };
 
   const handleValidate = async () => {
     if (!connection?.provider || !formData.apiKey) return;
     setValidating(true);
     setValidationResult(null);
+    setValidationError("");
     try {
-      const res = await fetch("/api/providers/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          provider: connection.provider,
-          apiKey: formData.apiKey,
-          ...(isAzure ? { providerSpecificData: azureData } : {}),
-          ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
-        }),
-      });
-      const data = await res.json();
-      setValidationResult(data.valid ? "success" : "failed");
+      await validateKey();
     } catch {
       setValidationResult("failed");
+      setValidationError("Could not reach the 9Router API");
     } finally {
       setValidating(false);
     }
@@ -120,21 +152,10 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           try {
             setValidating(true);
             setValidationResult(null);
-            const res = await fetch("/api/providers/validate", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                provider: connection.provider,
-                apiKey: formData.apiKey,
-                ...(isAzure ? { providerSpecificData: azureData } : {}),
-                ...(isCloudflareAi ? { providerSpecificData: cloudflareData } : {}),
-              }),
-            });
-            const data = await res.json();
-            isValid = !!data.valid;
-            setValidationResult(isValid ? "success" : "failed");
+            isValid = await validateKey();
           } catch {
             setValidationResult("failed");
+            setValidationError("Could not reach the 9Router API");
           } finally {
             setValidating(false);
           }
@@ -269,9 +290,14 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
               </div>
             </div>
             {validationResult && (
-              <Badge variant={validationResult === "success" ? "success" : "error"}>
-                {validationResult === "success" ? "Valid" : "Invalid"}
-              </Badge>
+              <div className="flex flex-col gap-1">
+                <Badge variant={validationResult === "success" ? "success" : "error"}>
+                  {validationResult === "success" ? "Valid" : "Invalid"}
+                </Badge>
+                {validationResult === "failed" && validationError && (
+                  <span className="text-sm text-red-500 break-words">{validationError}</span>
+                )}
+              </div>
             )}
           </>
         )}
@@ -318,9 +344,14 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
               {testing ? "Testing..." : "Test Connection"}
             </Button>
             {testResult && (
-              <Badge variant={testResult === "success" ? "success" : "error"}>
-                {testResult === "success" ? "Valid" : "Failed"}
-              </Badge>
+              <div className="flex flex-col gap-1">
+                <Badge variant={testResult === "success" ? "success" : "error"}>
+                  {testResult === "success" ? "Valid" : "Failed"}
+                </Badge>
+                {testResult === "failed" && testError && (
+                  <span className="text-sm text-red-500 break-words">{testError}</span>
+                )}
+              </div>
             )}
           </div>
         )}

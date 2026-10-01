@@ -121,7 +121,7 @@ describe("provider node validation: non-JSON upstream bodies", () => {
 });
 
 describe("provider node validation: error categories stay distinct", () => {
-  it("reports 401 and 403 as an unauthorized key with the upstream reason", async () => {
+  it("reports 401 as a rejected key and keeps the upstream reason", async () => {
     for (const status of [401, 403]) {
       const out = await validate({
         status,
@@ -129,7 +129,7 @@ describe("provider node validation: error categories stay distinct", () => {
         payload: openAiNode(),
       });
       assert.equal(out.body.valid, false);
-      assert.match(out.body.error, /API key unauthorized/);
+      assert.match(out.body.error, /API key rejected/);
       assert.match(out.body.error, /Invalid or revoked API key/);
     }
   });
@@ -204,8 +204,8 @@ describe("provider node validation: error categories stay distinct", () => {
     });
     assert.equal(out.body.valid, false);
     assert.equal(out.body.category, "html_response");
-    assert.equal(out.body.error.includes("API key unauthorized"), false, "HTML must not be labeled a key failure");
-    assert.match(out.body.error, /HTML instead of API JSON/);
+    assert.equal(out.body.error.includes("API key rejected"), false, "HTML must not be labeled a key failure");
+    assert.match(out.body.error, /HTML page instead of API JSON/);
   });
 
   it("classifies a Cloudflare challenge page as a security challenge", async () => {
@@ -235,7 +235,7 @@ describe("provider node validation: error categories stay distinct", () => {
     });
     assert.equal(out.body.valid, false);
     assert.equal(out.body.category, "access_denied");
-    assert.equal(out.body.error.includes("API key unauthorized"), false);
+    assert.equal(out.body.error.includes("API key rejected"), false);
     assert.match(out.body.error, /denied access/i);
   });
 
@@ -246,7 +246,7 @@ describe("provider node validation: error categories stay distinct", () => {
       payload: openAiNode(),
     });
     assert.equal(out.body.category, "access_denied");
-    assert.match(out.body.error, /API key unauthorized/);
+    assert.match(out.body.error, /API key rejected/);
     assert.match(out.body.error, /Invalid API key/);
   });
 

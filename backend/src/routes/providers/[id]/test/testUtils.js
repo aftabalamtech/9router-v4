@@ -20,6 +20,31 @@ import {
 } from "@/lib/oauth/constants/oauth";
 import { buildClineHeaders } from "@/shared/utils/clineAuth";
 import { buildCompatibleChatUrl, buildCompatibleModelsUrl } from "@/lib/net/compatibleUrl";
+import { readUpstreamDiagnostic, publicUpstreamDiagnostics, describeUpstreamFailure } from "@/lib/net/upstreamDiagnostics";
+import { classifyNetworkFailure, describeNetworkFailure } from "@/lib/net/networkFailure";
+
+// Build the stored `lastError` + response payload from a classified upstream
+// diagnostic. The old code returned the literal "Invalid API key" for any
+// 401/403 and stored raw upstream HTML into lastError, which is how messages
+// beginning "[502]: <!DOCTYPE html>..." reached the connections table.
+function verdict(diagnostic, apiKey, noun) {
+  return {
+    error: describeUpstreamFailure(diagnostic, { apiKey, noun }),
+    errorCode: diagnostic.status,
+    status: diagnostic.status,
+    category: diagnostic.category,
+    diagnostics: publicUpstreamDiagnostics(diagnostic),
+  };
+}
+
+function networkVerdict(error, noun) {
+  const code = classifyNetworkFailure(error);
+  return {
+    error: describeNetworkFailure(code, noun),
+    category: code,
+    errorCode: null,
+  };
+}
 
 async function readResponseError(response) {
   const text = await response.text().catch(() => "");
@@ -397,31 +422,41 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
   // `.../chat/completions/models` here while chat used a different URL.
   if (isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider)) {
     const isAnthropic = isAnthropicCompatibleProvider(connection.provider);
-    const modelsUrl = buildCompatibleModelsUrl(
-      connection.providerSpecificData?.baseUrl,
-      connection.provider
-    );
+    const apiKey = connection.apiKey || connection.accessToken || "";
+    const baseUrl = connection.providerSpecificData?.baseUrl;
+    const modelsUrl = buildCompatibleModelsUrl(baseUrl, connection.provider);
     if (!modelsUrl) return { valid: false, error: "Missing or invalid base URL" };
-    try {
-      const modelsRes = await fetchWithConnectionProxy(modelsUrl, {
-        headers: buildCompatibleAuthHeaders(connection, isAnthropic),
-      }, effectiveProxy);
-      if (modelsRes.ok) return { valid: true, error: null };
-      if (isAuthFailure(modelsRes.status)) return { valid: false, error: "Invalid API key" };
-      // Drain the failed /models body before the next request so the socket
-      // and the single-read budget stay clean.
-      await readResponseError(modelsRes);
+    const chatUrl = buildCompatibleChatUrl(baseUrl, connection.provider);
+    const headers = buildCompatibleAuthHeaders(connection, isAnthropic);
 
-      const chatUrl = buildCompatibleChatUrl(
-        connection.providerSpecificData?.baseUrl,
-        connection.provider
-      );
-      const chatRes = await fetchWithConnectionProxy(chatUrl, {
+    // Reachability first, so a DNS/TLS/proxy failure is reported as such
+    // instead of being flattened into a credential verdict.
+    let modelsRes;
+    try {
+      modelsRes = await fetchWithConnectionProxy(modelsUrl, { headers }, effectiveProxy);
+    } catch (err) {
+      return { valid: false, ...networkVerdict(err, "Upstream /models") };
+    }
+
+    // Body is read exactly once, here, and classified by the shared module —
+    // this is what stops a 403 HTML challenge page being called an invalid key.
+    const modelsDiagnostic = await readUpstreamDiagnostic(modelsRes, { url: modelsUrl, method: "GET", hasAuth: !!apiKey, apiKey });
+    if (!modelsDiagnostic.nonJsonBody && modelsRes.ok) return { valid: true, error: null };
+
+    // A JSON 404/405 means "no catalog here" → fall through to a real request.
+    const catalogMissing = modelsRes.status === 404 || modelsRes.status === 405;
+    if (!catalogMissing) {
+      return {
+        valid: false,
+        ...verdict(modelsDiagnostic, apiKey, "Upstream /models"),
+      };
+    }
+
+    let chatRes;
+    try {
+      chatRes = await fetchWithConnectionProxy(chatUrl, {
         method: "POST",
-        headers: {
-          ...buildCompatibleAuthHeaders(connection, isAnthropic),
-          "Content-Type": "application/json",
-        },
+        headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({
           model: connection.defaultModel || "test",
           max_tokens: 1,
@@ -429,11 +464,17 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
           messages: [{ role: "user", content: "ping" }],
         }),
       }, effectiveProxy);
-      const valid = chatRes.ok || isReachableInferenceStatus(chatRes.status);
-      return { valid, error: valid ? null : (await readResponseError(chatRes)) || "Invalid API key or base URL" };
     } catch (err) {
-      return { valid: false, error: err.message };
+      return { valid: false, ...networkVerdict(err, "Upstream chat endpoint") };
     }
+
+    const chatDiagnostic = await readUpstreamDiagnostic(chatRes, { url: chatUrl, method: "POST", hasAuth: !!apiKey, apiKey });
+    // Any non-auth status below 500 still proves the endpoint is reachable and
+    // the credential was accepted (a 400 on a bad model is a *working* gateway).
+    if (chatRes.ok || isReachableInferenceStatus(chatRes.status)) {
+      return { valid: true, error: null, status: chatDiagnostic.status, category: chatDiagnostic.category };
+    }
+    return { valid: false, ...verdict(chatDiagnostic, apiKey, "Upstream chat endpoint") };
   }
 
   try {

@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import PropTypes from "prop-types";
 import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal, ConfirmModal } from "@/shared/components";
 import { cachedJson, invalidateCache } from "@/shared/utils/cachedJson";
+import { readJsonResponse } from "@/shared/utils/safeJson";
 import useConnectionEvents from "@/shared/hooks/useConnectionEvents";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 
@@ -220,21 +221,32 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
   const providerInfo = AI_PROVIDERS[provider];
   const isVideoProvider = providerInfo?.serviceKinds?.includes("video") || provider === "leonardo" || provider === "runwayml";
 
+  const validateKey = async () => {
+    // Safe reader: a non-JSON reply (Cloudflare interstitial, proxy error) must
+    // not throw `Unexpected token '<', "<!DOCTYPE "...` in the browser.
+    const parsed = await readJsonResponse(
+      await fetch("/api/providers/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, apiKey: formData.apiKey }),
+      }),
+      { label: "provider validation" }
+    );
+    const data = parsed.data || {};
+    const ok = parsed.ok && !!data.valid;
+    return { ok, error: ok ? "" : (data.error || parsed.error || "Validation failed") };
+  };
+
   const handleValidate = async () => {
     setValidating(true);
     setValidationError("");
     try {
-      const res = await fetch("/api/providers/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, apiKey: formData.apiKey }),
-      });
-      const data = await res.json();
-      setValidationResult(data.valid ? "success" : "failed");
-      setValidationError(data.valid ? "" : (data.error || "Validation failed"));
-    } catch (error) {
+      const { ok, error } = await validateKey();
+      setValidationResult(ok ? "success" : "failed");
+      setValidationError(ok ? "" : error);
+    } catch {
       setValidationResult("failed");
-      setValidationError(error.name === "AbortError" ? "Validation timed out" : "Could not reach 9Router API");
+      setValidationError("Could not reach 9Router API");
     }
     finally { setValidating(false); }
   };
@@ -246,18 +258,13 @@ function AddApiKeyModal({ isOpen, provider, providerName, proxyPools, onSave, on
       let isValid = false;
       try {
         setValidating(true); setValidationResult(null); setValidationError("");
-        const res = await fetch("/api/providers/validate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider, apiKey: formData.apiKey }),
-        });
-        const data = await res.json();
-        isValid = !!data.valid;
-        setValidationResult(isValid ? "success" : "failed");
-        setValidationError(isValid ? "" : (data.error || "Validation failed"));
-      } catch (error) {
+        const { ok, error } = await validateKey();
+        isValid = ok;
+        setValidationResult(ok ? "success" : "failed");
+        setValidationError(ok ? "" : error);
+      } catch {
         setValidationResult("failed");
-        setValidationError(error.name === "AbortError" ? "Validation timed out" : "Could not reach 9Router API");
+        setValidationError("Could not reach 9Router API");
       }
       finally { setValidating(false); }
       await onSave({

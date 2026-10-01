@@ -49,18 +49,25 @@ test("compatible API key validation trims key and checks upstream models respons
   assert.equal(out.calls[0].options.headers.Authorization, "Bearer secret-key");
 });
 
+// A 401 is the only status that may be called a credential failure, and it now
+// reports the upstream's own reason instead of a bare "Invalid API key".
 test("compatible validation reports invalid credentials accurately", async () => {
   const out = await validateWith({
     statusSequence: [401], responseBodies: ['{"error":{"message":"bad credential"}}'],
     body: { provider: providerId, apiKey: "bad-key" },
   });
-  assert.deepEqual(out.result, { valid: false, error: "Invalid API key" });
+  assert.equal(out.result.valid, false);
+  assert.equal(out.result.category, "invalid_credentials");
+  assert.match(out.result.error, /API key rejected/);
+  assert.match(out.result.error, /bad credential/);
+  assert.equal(out.result.diagnostics.finalUrl, "https://api.openai.com/v1/models");
+  assert.equal(JSON.stringify(out.result).includes("bad-key"), false, "the key must not be echoed");
 });
 
 test("compatible validation distinguishes rate limits and upstream failures without chat fallback", async () => {
-  for (const [status, expected] of [
-    [429, /Rate limited by upstream/],
-    [503, /Upstream server error \(HTTP 503\)/],
+  for (const [status, expected, category] of [
+    [429, /rate limited/i, "rate_limited"],
+    [503, /server failed \(HTTP 503\)/, "upstream_server_error"],
   ]) {
     const out = await validateWith({
       statusSequence: [status], responseBodies: ['{"error":"failure"}'],
@@ -68,6 +75,7 @@ test("compatible validation distinguishes rate limits and upstream failures with
     });
     assert.equal(out.result.valid, false);
     assert.match(out.result.error, expected);
+    assert.equal(out.result.category, category);
     assert.equal(out.calls.length, 1);
   }
 });
