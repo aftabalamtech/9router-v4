@@ -173,6 +173,43 @@ describe("failure classification", () => {
     }
   });
 
+  // A truncated or corrupt JSON body is the failure mode that used to produce a
+  // 500: a parse attempt threw instead of yielding a diagnosis. It must be
+  // classified, keep its real status, and still be reported to the operator.
+  it("classifies malformed JSON instead of throwing", async () => {
+    const cases = [
+      { body: '{"data":[{"id":"m-1"', status: 200 },          // truncated
+      { body: '{not json}', status: 200 },                   // corrupt
+      { body: '{"error":"x",}', status: 500 },               // trailing comma
+      { body: '{"a":1}{"b":2}', status: 200 },               // concatenated
+      { body: '', status: 200 },                             // empty body
+      { body: '\u0000\u0001binary', status: 200 },           // binary garbage
+    ];
+    for (const c of cases) {
+      const d = await classify(c.body, { status: c.status, headers: { "content-type": "application/json" } });
+      assert.equal(d.json, null, `body should not parse: ${JSON.stringify(c.body)}`);
+      assert.equal(d.parsed, false);
+      // The upstream status is preserved, not discarded by the parse failure.
+      assert.equal(d.status, c.status);
+      assert.notEqual(d.category, C.INVALID_CREDENTIALS, `malformed body must not be a credential failure: ${JSON.stringify(c.body)}`);
+    }
+  });
+
+  it("still classifies a malformed error body by its status code", async () => {
+    // When the body is unusable, the status is the only evidence left — a 401
+    // still means the credential was rejected.
+    for (const [status, expected] of [
+      [401, C.INVALID_CREDENTIALS],
+      [403, C.PERMISSION_DENIED],
+      [429, C.RATE_LIMITED],
+      [503, C.UPSTREAM_SERVER_ERROR],
+      [404, C.INVALID_ENDPOINT],
+    ]) {
+      const d = await classify('{{{ broken', { status, headers: { "content-type": "application/json" } });
+      assert.equal(d.category, expected, `status ${status}`);
+    }
+  });
+
   it("separates a credential 403 from an IP-block 403", async () => {
     const aboutKey = await classify('{"error":{"message":"Invalid API key for this project."}}', { status: 403 });
     assert.equal(aboutKey.category, C.INVALID_CREDENTIALS);
@@ -312,6 +349,49 @@ describe("POST /api/provider-diagnostics", () => {
     assert.deepEqual(body.results, { credential: true, models: true, chat: true, network: true });
     assert.equal(body.verdict, "healthy");
     assert.equal(body.checks.length, 4);
+  });
+
+  it("reports a successful chat completion separately from a successful model listing", async () => {
+    // The three "good" outcomes must stay distinguishable: a gateway can list
+    // models, or serve chat, or both, and each is a different capability.
+    const both = await runDiagnostics(target({ modelId: "m-1", includeChat: true }), [
+      { status: 200, body: '{"data":[{"id":"m-1"}]}' },
+      { status: 200, body: '{"data":[{"id":"m-1"},{"id":"m-2"}]}' },
+      { status: 200, body: '{"choices":[{"message":{"content":"pong"}}]}' },
+    ]);
+    assert.equal(both.body.results.chat, true);
+    assert.match(both.body.checks.find((c) => c.name === "chat").message, /completed a chat completion with "m-1"/);
+    assert.equal(both.body.checks.find((c) => c.name === "chat").modelId, "m-1");
+
+    // Models work, chat fails → the failure must not be reported as a bad key.
+    const chatFails = await runDiagnostics(target({ modelId: "m-1", includeChat: true }), [
+      { status: 200, body: '{"data":[]}' },
+      { status: 200, body: '{"data":[{"id":"m-1"}]}' },
+      { status: 200, body: '{"data":[{"id":"m-1"}]}' },
+      { status: 400, body: '{"error":{"message":"model is overloaded"}}' },
+    ]);
+    assert.equal(chatFails.body.results.models, true);
+    assert.equal(chatFails.body.results.chat, false);
+    assert.equal(
+      chatFails.body.checks.find((c) => c.name === "chat").credentialRejected,
+      false,
+      "a model-level 400 is not a credential problem"
+    );
+  });
+
+  it("handles a chat completion that fails mid-stream", async () => {
+    // Providers abort SSE mid-response. The operator must see a category, not a
+    // generic transport error.
+    const truncatedSse = await runDiagnostics(target({ modelId: "m-1", includeChat: true }), [
+      { status: 200, body: '{"data":[]}' },
+      { status: 200, body: '{"data":[{"id":"m-1"}]}' },
+      { status: 200, body: '{"data":[{"id":"m-1"}]}' },
+      { status: 200, body: 'data: {"choices":[{"delta":{"content":"po', headers: { "content-type": "text/event-stream" } },
+    ]);
+    const chat = truncatedSse.body.checks.find((c) => c.name === "chat");
+    assert.equal(chat.ok, false, "a truncated SSE body is not a completed completion");
+    assert.equal(chat.credentialRejected, false);
+    assert.ok(chat.category, "a category must still be assigned");
   });
 
   it("reports an unreachable host as blocked, not as a bad key", async () => {
